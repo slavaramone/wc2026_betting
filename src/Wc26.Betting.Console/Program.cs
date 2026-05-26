@@ -1,6 +1,7 @@
 using Wc26.Betting.Core.Calendar;
 using Wc26.Betting.Core.Players;
 using Wc26.Betting.Core.Sofascore;
+using Wc26.Betting.Core.TeamRatings;
 using Wc26.Betting.Core.Validation;
 
 var exitCode = await CliApplication.RunAsync(args, CancellationToken.None);
@@ -113,6 +114,7 @@ internal static class CliApplication
         var overwrite = options.GetBool("overwrite", false);
         var skipCalendar = options.GetBool("skip-calendar", false);
         var skipPlayerRatings = options.GetBool("skip-player-ratings", false);
+        var skipEloRatings = options.GetBool("skip-elo-ratings", false);
 
         Directory.CreateDirectory(outputFolder);
 
@@ -140,6 +142,17 @@ internal static class CliApplication
             Console.WriteLine($"  Rows read: {ratings.RowCount}");
             Console.WriteLine($"  Players imported: {ratings.Players.Count}");
             Console.WriteLine($"  Output: {Path.Combine(outputFolder, "player-ratings")}");
+        }
+
+        if (!skipEloRatings)
+        {
+            Console.WriteLine("Building hardcoded Elo ratings model set...");
+            var eloBuilder = new HardcodedEloRatingsBuilder();
+            var elo = eloBuilder.Build();
+            await eloBuilder.WriteAsync(elo, outputFolder, overwrite, cancellationToken);
+            Console.WriteLine($"  Teams: {elo.Teams.Count}");
+            Console.WriteLine($"  As of: {elo.AsOfDate:yyyy-MM-dd}");
+            Console.WriteLine($"  Output: {Path.Combine(outputFolder, "team-ratings")}");
         }
 
         if (options.GetBool("validate", true))
@@ -248,6 +261,7 @@ internal static class CliApplication
         Console.WriteLine("  --overwrite                    Overwrite existing model files");
         Console.WriteLine("  --skip-calendar                Do not build calendar/group model sets");
         Console.WriteLine("  --skip-player-ratings          Do not build player-ratings model set");
+        Console.WriteLine("  --skip-elo-ratings             Do not build hardcoded Elo ratings model set");
         Console.WriteLine("  --validate <true|false>        Run validation after build. Default: true");
         Console.WriteLine();
         Console.WriteLine("Options for validate-models:");

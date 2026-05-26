@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Wc26.Betting.Core.Models;
 using Wc26.Betting.Core.Players;
+using Wc26.Betting.Core.TeamRatings;
 
 namespace Wc26.Betting.Core.Validation;
 
@@ -22,11 +23,13 @@ public sealed class ModelsValidator
         var groupsPath = Path.Combine(modelsFolder, "calendar", "wc2026-groups.json");
         var playerPath = Path.Combine(modelsFolder, "player-ratings", "eafc26-men-player-ratings.json");
         var seedsPath = Path.Combine(modelsFolder, "player-ratings", "eafc26-nation-rating-seeds.json");
+        var eloPath = Path.Combine(modelsFolder, "team-ratings", "hardcoded-elo-ratings.json");
 
         Wc2026CalendarSet? calendar = null;
         Wc2026GroupSet? groups = null;
         EaFcPlayerRatingSet? ratings = null;
         List<NationRatingSeed>? seeds = null;
+        EloRatingSet? elo = null;
 
         if (!File.Exists(calendarPath)) report.Errors.Add($"Missing calendar model: {calendarPath}");
         else calendar = await ReadAsync<Wc2026CalendarSet>(calendarPath, report, cancellationToken);
@@ -40,10 +43,15 @@ public sealed class ModelsValidator
         if (!File.Exists(seedsPath)) report.Warnings.Add($"Missing nation rating seed model: {seedsPath}");
         else seeds = await ReadAsync<List<NationRatingSeed>>(seedsPath, report, cancellationToken);
 
+        if (!File.Exists(eloPath)) report.Errors.Add($"Missing hardcoded Elo ratings model: {eloPath}");
+        else elo = await ReadAsync<EloRatingSet>(eloPath, report, cancellationToken);
+
         if (calendar is not null) ValidateCalendar(calendar, report);
         if (groups is not null) ValidateGroups(groups, calendar, report);
         if (ratings is not null) ValidateRatings(ratings, report);
+        if (elo is not null) ValidateEloRatings(elo, report);
         if (calendar is not null && ratings is not null) ValidateCalendarTeamCoverage(calendar, ratings, seeds, report);
+        if (calendar is not null && elo is not null) ValidateCalendarEloCoverage(calendar, elo, report);
 
         if (writeReport)
         {
@@ -191,6 +199,31 @@ public sealed class ModelsValidator
         }
     }
 
+
+    private static void ValidateEloRatings(EloRatingSet elo, ModelValidationReport report)
+    {
+        report.Info.Add($"Hardcoded Elo teams: {elo.Teams.Count}; as of {elo.AsOfDate:yyyy-MM-dd}");
+
+        if (elo.Teams.Count < 100)
+            report.Warnings.Add($"Hardcoded Elo model has only {elo.Teams.Count} teams. This can be OK for MVP, but broader coverage is better.");
+
+        var duplicateTeams = elo.Teams
+            .GroupBy(x => x.NormalizedTeam, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .Take(20)
+            .ToList();
+        if (duplicateTeams.Count > 0)
+            report.Errors.Add($"Duplicate normalized teams in hardcoded Elo model: {string.Join(", ", duplicateTeams)}");
+
+        var invalidRatings = elo.Teams.Where(x => x.Rating < 300 || x.Rating > 2500).Select(x => $"{x.Team}={x.Rating}").Take(20).ToList();
+        if (invalidRatings.Count > 0)
+            report.Errors.Add($"Invalid Elo ratings outside 300..2500: {string.Join(", ", invalidRatings)}");
+
+        var top = elo.Teams.OrderByDescending(x => x.Rating).Take(5).Select(x => $"{x.Team}={x.Rating}");
+        report.Info.Add($"Top hardcoded Elo teams: {string.Join(", ", top)}");
+    }
+
     private static void ValidateRatings(EaFcPlayerRatingSet ratings, ModelValidationReport report)
     {
         report.Info.Add($"EA ratings rows read: {ratings.RowCount}; players imported: {ratings.Players.Count}");
@@ -260,6 +293,30 @@ public sealed class ModelsValidator
             if (lowConfidence.Count > 0)
                 report.Info.Add($"Example low/medium confidence nation seeds: {string.Join(", ", lowConfidence)}");
         }
+    }
+
+
+    private static void ValidateCalendarEloCoverage(Wc2026CalendarSet calendar, EloRatingSet elo, ModelValidationReport report)
+    {
+        var eloTeams = elo.Teams
+            .Select(x => HardcodedEloRatingsBuilder.NormalizeToEloName(x.NormalizedTeam))
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var calendarTeams = calendar.Matches
+            .Where(x => x.HasKnownTeams)
+            .SelectMany(x => new[] { x.HomeTeam, x.AwayTeam })
+            .Select(HardcodedEloRatingsBuilder.NormalizeToEloName)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var missing = calendarTeams.Where(team => !eloTeams.Contains(team)).ToList();
+        report.Info.Add($"Known calendar teams mapped to hardcoded Elo: {calendarTeams.Count - missing.Count}/{calendarTeams.Count}");
+
+        if (missing.Count > 0)
+            report.Warnings.Add($"Calendar teams not found in hardcoded Elo ratings after built-in normalization: {string.Join(", ", missing.Take(40))}.");
     }
 
     private static string NormalizeNation(string value)
