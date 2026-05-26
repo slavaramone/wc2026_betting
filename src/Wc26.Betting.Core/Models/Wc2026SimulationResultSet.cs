@@ -7,6 +7,9 @@ public sealed class Wc2026SimulationResultSet
     public int Iterations { get; init; }
     public int Seed { get; init; }
     public string ModelsFolder { get; init; } = string.Empty;
+    public double MarketWeight { get; init; }
+    public double EloWeight { get; init; }
+    public double EaWeight { get; init; }
     public string Notes { get; init; } = string.Empty;
     public List<Wc2026SimulationTeamSummary> Teams { get; init; } = [];
     public List<Wc2026SimulationGroupSummary> Groups { get; init; } = [];

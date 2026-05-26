@@ -6,14 +6,42 @@ using Wc26.Betting.Core.Utilities;
 
 namespace Wc26.Betting.Core.Simulation;
 
+public sealed record Wc2026SimulationWeights(double Market, double Elo, double Ea)
+{
+    public string Label => $"{(int)Math.Round(Market * 100)}_{(int)Math.Round(Elo * 100)}_{(int)Math.Round(Ea * 100)}";
+
+    public void Validate()
+    {
+        if (Market < 0 || Elo < 0 || Ea < 0)
+            throw new ArgumentException("Simulation blend weights cannot be negative.");
+
+        var sum = Market + Elo + Ea;
+        if (sum <= 0)
+            throw new ArgumentException("At least one simulation blend weight must be greater than zero.");
+    }
+
+    public Wc2026SimulationWeights Normalized()
+    {
+        var sum = Market + Elo + Ea;
+        return sum <= 0 ? this : new Wc2026SimulationWeights(Market / sum, Elo / sum, Ea / sum);
+    }
+}
+
 public sealed class Wc2026SimulationRunner
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true, WriteIndented = true };
 
-    private const double MarketProbabilityWeight = 0.85;
-    private const double EloProbabilityWeight = 0.12;
-    private const double EaProbabilityWeight = 0.03;
+    public static readonly Wc2026SimulationWeights DefaultWeights = new(0.85, 0.12, 0.03);
 
+
+    public Task<Wc2026SimulationResultSet> RunFromModelsFolderAsync(
+        string modelsFolder,
+        int iterations,
+        int seed,
+        string? outputFolder,
+        bool overwrite,
+        CancellationToken cancellationToken)
+        => RunFromModelsFolderAsync(modelsFolder, iterations, seed, outputFolder, overwrite, DefaultWeights, cancellationToken);
 
     public async Task<Wc2026SimulationResultSet> RunFromModelsFolderAsync(
         string modelsFolder,
@@ -21,6 +49,7 @@ public sealed class Wc2026SimulationRunner
         int seed,
         string? outputFolder,
         bool overwrite,
+        Wc2026SimulationWeights weights,
         CancellationToken cancellationToken)
     {
         if (iterations <= 0)
@@ -33,7 +62,7 @@ public sealed class Wc2026SimulationRunner
         var elo = await ReadRequiredAsync<EloRatingSet>(Path.Combine(modelsFolder, "team-ratings", "hardcoded-elo-ratings.json"), cancellationToken);
         var seeds = await ReadRequiredAsync<List<NationRatingSeed>>(Path.Combine(modelsFolder, "player-ratings", "eafc26-nation-rating-seeds.json"), cancellationToken);
 
-        var result = Run(groups, odds, elo, seeds, modelsFolder, iterations, seed);
+        var result = Run(groups, odds, elo, seeds, modelsFolder, iterations, seed, weights);
 
         var destination = outputFolder ?? Path.Combine(modelsFolder, "simulation");
         await WriteAsync(result, destination, overwrite, cancellationToken);
@@ -47,8 +76,12 @@ public sealed class Wc2026SimulationRunner
         IReadOnlyList<NationRatingSeed> seeds,
         string modelsFolder,
         int iterations,
-        int seed)
+        int seed,
+        Wc2026SimulationWeights? weights = null)
     {
+        var activeWeights = weights ?? DefaultWeights;
+        activeWeights.Validate();
+
         var rng = new Random(seed);
         var allTeams = groups.Groups
             .SelectMany(g => g.Teams.Select(t => new TeamRef(g.GroupCode, t.TeamName)))
@@ -81,7 +114,7 @@ public sealed class Wc2026SimulationRunner
 
                 foreach (var match in group.Matches.OrderBy(x => x.StartUtc ?? DateTimeOffset.MaxValue).ThenBy(x => x.EventId))
                 {
-                    var result = SimulateMatch(match, oddsByEventId.GetValueOrDefault(match.EventId), eloByTeam, seedByTeam, rng);
+                    var result = SimulateMatch(match, oddsByEventId.GetValueOrDefault(match.EventId), eloByTeam, seedByTeam, activeWeights, rng);
                     ApplyResult(table[result.HomeTeam], table[result.AwayTeam], result.HomeGoals, result.AwayGoals);
                     playedMatches.Add(result);
                 }
@@ -211,7 +244,10 @@ public sealed class Wc2026SimulationRunner
             ModelsFolder = modelsFolder,
             Iterations = iterations,
             Seed = seed,
-            Notes = "Group-stage simulation uses blended match probabilities: 85% normalized market 1X2, 12% Elo, 3% EA nation strength. Ranks groups with FIFA-style MVP tiebreakers and selects 8 best third-place teams. Knockout bracket is not simulated yet.",
+            MarketWeight = activeWeights.Market,
+            EloWeight = activeWeights.Elo,
+            EaWeight = activeWeights.Ea,
+            Notes = $"Group-stage simulation uses blended match probabilities: {activeWeights.Market:P0} normalized market 1X2, {activeWeights.Elo:P0} Elo, {activeWeights.Ea:P0} EA nation strength. Ranks groups with FIFA-style MVP tiebreakers and selects 8 best third-place teams. Knockout bracket is not simulated yet.",
             Teams = teamSummaries,
             Groups = groupSummaries,
             PairComparisons = pairSummaries
@@ -223,9 +259,10 @@ public sealed class Wc2026SimulationRunner
         GameOddsMatch? odds,
         IReadOnlyDictionary<string, EloTeamRating> eloByTeam,
         IReadOnlyDictionary<string, NationRatingSeed> seedByTeam,
+        Wc2026SimulationWeights weights,
         Random rng)
     {
-        var probabilities = BlendedMatchProbabilities(match.HomeTeam, match.AwayTeam, odds, eloByTeam, seedByTeam);
+        var probabilities = BlendedMatchProbabilities(match.HomeTeam, match.AwayTeam, odds, eloByTeam, seedByTeam, weights);
 
         var roll = rng.NextDouble();
         if (roll < probabilities.HomeWin)
@@ -251,15 +288,18 @@ public sealed class Wc2026SimulationRunner
         string awayTeam,
         GameOddsMatch? odds,
         IReadOnlyDictionary<string, EloTeamRating> eloByTeam,
-        IReadOnlyDictionary<string, NationRatingSeed> seedByTeam)
+        IReadOnlyDictionary<string, NationRatingSeed> seedByTeam,
+        Wc2026SimulationWeights weights)
     {
         var weighted = new List<(OutcomeProbabilities Probabilities, double Weight)>();
 
         if (odds is not null && odds.Odds1 is > 1.0 && odds.OddsX is > 1.0 && odds.Odds2 is > 1.0)
-            weighted.Add((ProbabilitiesFromOdds(odds.Odds1.Value, odds.OddsX.Value, odds.Odds2.Value), MarketProbabilityWeight));
+            weighted.Add((ProbabilitiesFromOdds(odds.Odds1.Value, odds.OddsX.Value, odds.Odds2.Value), weights.Market));
 
-        weighted.Add((ProbabilitiesFromElo(homeTeam, awayTeam, eloByTeam), EloProbabilityWeight));
-        weighted.Add((ProbabilitiesFromEa(homeTeam, awayTeam, seedByTeam), EaProbabilityWeight));
+        if (weights.Elo > 0)
+            weighted.Add((ProbabilitiesFromElo(homeTeam, awayTeam, eloByTeam), weights.Elo));
+        if (weights.Ea > 0)
+            weighted.Add((ProbabilitiesFromEa(homeTeam, awayTeam, seedByTeam), weights.Ea));
 
         var totalWeight = weighted.Sum(x => x.Weight);
         if (totalWeight <= 0)

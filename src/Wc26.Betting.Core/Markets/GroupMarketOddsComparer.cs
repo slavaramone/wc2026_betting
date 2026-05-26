@@ -29,6 +29,27 @@ public sealed class GroupMarketOddsComparer
         var simulation = JsonSerializer.Deserialize<Wc2026SimulationResultSet>(simulationJson, JsonOptions)
             ?? throw new InvalidOperationException($"Failed to deserialize simulation summary: {simulationPath}");
 
+        return await CompareFromSimulationAsync(
+            modelsFolder,
+            simulation,
+            groupStageResultsOddsFile,
+            finishHigherOddsFile,
+            outputFolder,
+            minEdge,
+            overwrite,
+            cancellationToken);
+    }
+
+    public async Task<GroupMarketComparisonResult> CompareFromSimulationAsync(
+        string modelsFolder,
+        Wc2026SimulationResultSet simulation,
+        string? groupStageResultsOddsFile,
+        string? finishHigherOddsFile,
+        string outputFolder,
+        double minEdge,
+        bool overwrite,
+        CancellationToken cancellationToken)
+    {
         var rows = new List<GroupMarketComparisonRow>();
 
         if (!string.IsNullOrWhiteSpace(groupStageResultsOddsFile))
