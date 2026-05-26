@@ -37,7 +37,46 @@ public sealed class Wc2026CalendarMatch
 
     private static bool IsPlaceholderTeam(string value)
     {
-        var normalized = value.Trim().ToLowerInvariant();
-        return normalized is "tbd" or "to be decided" or "winner" or "unknown" or "-";
+        var normalized = value.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            return true;
+
+        var lower = normalized.ToLowerInvariant();
+        if (lower is "tbd" or "to be decided" or "winner" or "unknown" or "-")
+            return true;
+
+        // SofaScore publishes future knockout placeholders such as 1A, 2B, G1, H2, W100, L101
+        // and best-third combinations such as 3A/3B/3C/3D/3F. These are bracket labels, not nations.
+        if (IsRankGroupPlaceholder(normalized) || IsWinnerLoserPlaceholder(normalized))
+            return true;
+
+        if (normalized.Contains('/'))
+        {
+            var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            return parts.Length > 0 && parts.All(IsRankGroupPlaceholder);
+        }
+
+        return false;
+    }
+
+    private static bool IsRankGroupPlaceholder(string value)
+    {
+        if (value.Length != 2)
+            return false;
+
+        var first = char.ToUpperInvariant(value[0]);
+        var second = char.ToUpperInvariant(value[1]);
+
+        return ((first is '1' or '2' or '3') && second >= 'A' && second <= 'L')
+            || (first >= 'A' && first <= 'L' && second is '1' or '2' or '3');
+    }
+
+    private static bool IsWinnerLoserPlaceholder(string value)
+    {
+        if (value.Length < 2)
+            return false;
+
+        var first = char.ToUpperInvariant(value[0]);
+        return (first is 'W' or 'L') && value.Skip(1).All(char.IsDigit);
     }
 }

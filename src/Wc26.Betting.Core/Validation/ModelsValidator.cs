@@ -172,7 +172,7 @@ public sealed class ModelsValidator
         report.Info.Add($"Known calendar teams: {calendarTeams.Count}; directly mapped to EA nations: {calendarTeams.Count - missing.Count}");
 
         if (missing.Count > 0)
-            report.Warnings.Add($"Calendar teams not directly found as EA nations: {string.Join(", ", missing.Take(40))}. Add a name mapping later if these are qualified teams.");
+            report.Warnings.Add($"Calendar teams not directly found as EA nations after built-in normalization: {string.Join(", ", missing.Take(40))}.");
 
         if (seeds is not null)
         {
@@ -195,6 +195,14 @@ public sealed class ModelsValidator
             "Türkiye" => "Turkey",
             "Côte d'Ivoire" => "Ivory Coast",
             "Czechia" => "Czech Republic",
+
+            // Built-in SofaScore -> EAFC26 country-name normalization.
+            // Kept in code by design; no external alias file is used.
+            "Bosnia & Herzegovina" => "Bosnia and Herzegovina",
+            "Cabo Verde" => "Cape Verde Islands",
+            "DR Congo" => "Congo DR",
+            "Netherlands" => "Holland",
+
             _ => v
         };
     }
