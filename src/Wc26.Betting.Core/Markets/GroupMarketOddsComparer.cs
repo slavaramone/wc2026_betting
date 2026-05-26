@@ -166,6 +166,80 @@ public sealed class GroupMarketOddsComparer
         }
     }
 
+
+    private static string ResolveReportGroupCode(string rawMarketGroupCode, string selection, string opponent, string simulationGroupCode)
+    {
+        var fromSelection = TryGetMarketGroupCode(selection);
+        var fromOpponent = TryGetMarketGroupCode(opponent);
+
+        if (!string.IsNullOrWhiteSpace(fromSelection) && !string.IsNullOrWhiteSpace(fromOpponent))
+        {
+            if (string.Equals(fromSelection, fromOpponent, StringComparison.OrdinalIgnoreCase))
+                return fromSelection;
+
+            // This should not happen for same-group markets. Keep the source value if it exists,
+            // otherwise keep the inferred simulation group and make the issue visible in Notes.
+            return !string.IsNullOrWhiteSpace(rawMarketGroupCode) ? rawMarketGroupCode : simulationGroupCode;
+        }
+
+        if (!string.IsNullOrWhiteSpace(fromSelection)) return fromSelection;
+        if (!string.IsNullOrWhiteSpace(fromOpponent)) return fromOpponent;
+        if (!string.IsNullOrWhiteSpace(rawMarketGroupCode)) return rawMarketGroupCode;
+        return simulationGroupCode;
+    }
+
+    private static string BuildGroupCodeNotes(string rawMarketGroupCode, string reportGroupCode, string simulationGroupCode)
+    {
+        var notes = new List<string>();
+        if (!string.IsNullOrWhiteSpace(rawMarketGroupCode) &&
+            !string.Equals(rawMarketGroupCode, reportGroupCode, StringComparison.OrdinalIgnoreCase))
+        {
+            notes.Add($"Source group {rawMarketGroupCode} normalized to report group {reportGroupCode}.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(simulationGroupCode) &&
+            !string.Equals(simulationGroupCode, reportGroupCode, StringComparison.OrdinalIgnoreCase))
+        {
+            notes.Add($"Model inferred group {simulationGroupCode}; report uses market group {reportGroupCode}.");
+        }
+
+        return string.Join(' ', notes);
+    }
+
+    private static string? TryGetMarketGroupCode(string team)
+    {
+        if (string.IsNullOrWhiteSpace(team)) return null;
+        return MarketGroupCodeByTeam.TryGetValue(NormalizeTeam(team), out var groupCode) ? groupCode : null;
+    }
+
+    private static readonly IReadOnlyDictionary<string, string> MarketGroupCodeByTeam = BuildMarketGroupCodeByTeam();
+
+    private static IReadOnlyDictionary<string, string> BuildMarketGroupCodeByTeam()
+    {
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        Add(dict, "A", "Mexico", "Czechia", "South Korea", "South Africa");
+        Add(dict, "B", "Switzerland", "Canada", "Bosnia & Herzegovina", "Bosnia and Herzegovina", "Qatar");
+        Add(dict, "C", "Brazil", "Morocco", "Scotland", "Haiti");
+        Add(dict, "D", "USA", "Türkiye", "Turkiye", "Turkey", "Paraguay", "Australia");
+        Add(dict, "E", "Germany", "Ecuador", "Côte d'Ivoire", "Cote d'Ivoire", "Curacao", "Curaçao");
+        Add(dict, "F", "Netherlands", "Japan", "Sweden", "Tunisia");
+        Add(dict, "G", "Belgium", "Egypt", "Iran", "New Zealand");
+        Add(dict, "H", "Spain", "Uruguay", "Saudi Arabia", "Cabo Verde", "Cape Verde");
+        Add(dict, "I", "France", "Norway", "Senegal", "Iraq");
+        Add(dict, "J", "Argentina", "Austria", "Algeria", "Jordan");
+        Add(dict, "K", "Portugal", "Colombia", "DR Congo", "Congo DR", "Uzbekistan");
+        Add(dict, "L", "England", "Croatia", "Ghana", "Panama");
+
+        return dict;
+    }
+
+    private static void Add(Dictionary<string, string> dict, string groupCode, params string[] teams)
+    {
+        foreach (var team in teams)
+            dict[NormalizeTeam(team)] = groupCode;
+    }
+
     private static GroupMarketComparisonRow CreateRow(
         string sourceMarketType,
         string marketGroupCode,
@@ -180,14 +254,22 @@ public sealed class GroupMarketOddsComparer
         string sourceImage,
         double minEdge)
     {
+        var reportGroupCode = ResolveReportGroupCode(marketGroupCode, selection, opponent, simulationGroupCode);
+        var groupNotes = BuildGroupCodeNotes(marketGroupCode, reportGroupCode, simulationGroupCode);
+
         if (bookOdds is null or <= 1.0)
-            return InvalidRow(sourceMarketType, marketGroupCode, selection, side, opponent, sourceImage, "Missing or invalid book odds.") with
+        {
+            return InvalidRow(sourceMarketType, marketGroupCode, selection, side, opponent, sourceImage, JoinNotes("Missing or invalid book odds.", groupNotes)) with
             {
+                OriginalMarketGroupCode = marketGroupCode,
+                ReportGroupCode = reportGroupCode,
+                MarketGroupCode = reportGroupCode,
                 SimulationGroupCode = simulationGroupCode,
                 Market = market,
                 SimulationProbability = Round(simulationProbability),
                 FairOdds = FairOdds(simulationProbability)
             };
+        }
 
         var raw = 1.0 / bookOdds.Value;
         double? noVig = null;
@@ -206,7 +288,9 @@ public sealed class GroupMarketOddsComparer
         return new GroupMarketComparisonRow
         {
             SourceMarketType = sourceMarketType,
-            MarketGroupCode = marketGroupCode,
+            OriginalMarketGroupCode = marketGroupCode,
+            ReportGroupCode = reportGroupCode,
+            MarketGroupCode = reportGroupCode,
             SimulationGroupCode = simulationGroupCode,
             Market = market,
             Selection = selection,
@@ -223,7 +307,7 @@ public sealed class GroupMarketOddsComparer
             EdgePercent = Round(edge * 100.0),
             Decision = decision,
             SourceImage = sourceImage,
-            Notes = string.Empty
+            Notes = groupNotes
         };
     }
 
@@ -231,6 +315,8 @@ public sealed class GroupMarketOddsComparer
         => new()
         {
             SourceMarketType = sourceMarketType,
+            OriginalMarketGroupCode = marketGroupCode,
+            ReportGroupCode = marketGroupCode,
             MarketGroupCode = marketGroupCode,
             Market = sourceMarketType,
             Selection = selection,
@@ -256,7 +342,9 @@ public sealed class GroupMarketOddsComparer
             TopEdges = bets.Select(x => new GroupMarketTopEdge
             {
                 Market = x.Market,
+                ReportGroupCode = x.ReportGroupCode,
                 MarketGroupCode = x.MarketGroupCode,
+                OriginalMarketGroupCode = x.OriginalMarketGroupCode,
                 SimulationGroupCode = x.SimulationGroupCode,
                 Selection = x.Selection,
                 Side = x.Side,
@@ -281,12 +369,12 @@ public sealed class GroupMarketOddsComparer
 
         await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(result, JsonOptions), cancellationToken);
         await using var writer = new StreamWriter(csvPath);
-        await writer.WriteLineAsync("source_market_type,market_group_code,simulation_group_code,market,selection,side,opponent,book_odds,paired_book_odds,book_probability_raw,book_probability_no_vig,book_probability_used,simulation_probability,fair_odds,edge_probability,edge_percent,decision,source_image,notes");
+        await writer.WriteLineAsync("source_market_type,report_group_code,market_group_code,original_market_group_code,simulation_group_code,market,selection,side,opponent,book_odds,paired_book_odds,book_probability_raw,book_probability_no_vig,book_probability_used,simulation_probability,fair_odds,edge_probability,edge_percent,decision,source_image,notes");
         foreach (var r in result.Rows.OrderByDescending(x => x.Decision == "BET").ThenByDescending(x => x.EdgeProbability))
         {
             var values = new[]
             {
-                r.SourceMarketType, r.MarketGroupCode, r.SimulationGroupCode, r.Market, r.Selection, r.Side, r.Opponent,
+                r.SourceMarketType, r.ReportGroupCode, r.MarketGroupCode, r.OriginalMarketGroupCode, r.SimulationGroupCode, r.Market, r.Selection, r.Side, r.Opponent,
                 Format(r.BookOdds), Format(r.PairedBookOdds), Format(r.BookProbabilityRaw), Format(r.BookProbabilityNoVig), Format(r.BookProbabilityUsed),
                 Format(r.SimulationProbability), Format(r.FairOdds), Format(r.EdgeProbability), Format(r.EdgePercent), r.Decision, r.SourceImage, r.Notes
             };
@@ -327,7 +415,22 @@ public sealed class GroupMarketOddsComparer
     }
 
     private static string NormalizeTeam(string value)
-        => value.Trim().Replace("&", "and", StringComparison.OrdinalIgnoreCase);
+    {
+        value = value.Trim()
+            .Replace("&", "and", StringComparison.OrdinalIgnoreCase)
+            .Replace("’", "'", StringComparison.OrdinalIgnoreCase);
+
+        var normalized = value.Normalize(System.Text.NormalizationForm.FormD);
+        var chars = normalized
+            .Where(c => CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark)
+            .ToArray();
+
+        return new string(chars).Normalize(System.Text.NormalizationForm.FormC);
+    }
+
+    private static string JoinNotes(params string[] notes)
+        => string.Join(' ', notes.Where(x => !string.IsNullOrWhiteSpace(x)));
+
 
     private static string PairKey(string team1, string team2)
     {
@@ -365,7 +468,9 @@ public sealed class GroupMarketComparisonSummary
 public sealed record GroupMarketComparisonRow
 {
     public string SourceMarketType { get; init; } = string.Empty;
+    public string ReportGroupCode { get; init; } = string.Empty;
     public string MarketGroupCode { get; init; } = string.Empty;
+    public string OriginalMarketGroupCode { get; init; } = string.Empty;
     public string SimulationGroupCode { get; init; } = string.Empty;
     public string Market { get; init; } = string.Empty;
     public string Selection { get; init; } = string.Empty;
@@ -388,7 +493,9 @@ public sealed record GroupMarketComparisonRow
 public sealed class GroupMarketTopEdge
 {
     public string Market { get; init; } = string.Empty;
+    public string ReportGroupCode { get; init; } = string.Empty;
     public string MarketGroupCode { get; init; } = string.Empty;
+    public string OriginalMarketGroupCode { get; init; } = string.Empty;
     public string SimulationGroupCode { get; init; } = string.Empty;
     public string Selection { get; init; } = string.Empty;
     public string Side { get; init; } = string.Empty;
