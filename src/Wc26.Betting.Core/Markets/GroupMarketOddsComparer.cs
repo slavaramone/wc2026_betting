@@ -331,6 +331,7 @@ public sealed class GroupMarketOddsComparer
     {
         var valid = rows.Where(x => x.Decision != "INVALID").ToList();
         var bets = valid.Where(x => x.Decision == "BET").OrderByDescending(x => x.EdgeProbability).Take(50).ToList();
+        var strictBets = valid.Where(IsStrictBet).OrderByDescending(x => x.EdgeProbability).ToList();
         return new GroupMarketComparisonSummary
         {
             Rows = rows.Count,
@@ -339,23 +340,45 @@ public sealed class GroupMarketOddsComparer
             BetRows = valid.Count(x => x.Decision == "BET"),
             LeanRows = valid.Count(x => x.Decision == "LEAN"),
             NoBetRows = valid.Count(x => x.Decision == "NO_BET"),
-            TopEdges = bets.Select(x => new GroupMarketTopEdge
-            {
-                Market = x.Market,
-                ReportGroupCode = x.ReportGroupCode,
-                MarketGroupCode = x.MarketGroupCode,
-                OriginalMarketGroupCode = x.OriginalMarketGroupCode,
-                SimulationGroupCode = x.SimulationGroupCode,
-                Selection = x.Selection,
-                Side = x.Side,
-                Opponent = x.Opponent,
-                BookOdds = x.BookOdds,
-                SimulationProbability = x.SimulationProbability,
-                BookProbabilityUsed = x.BookProbabilityUsed,
-                EdgeProbability = x.EdgeProbability,
-                Decision = x.Decision
-            }).ToList()
+            StrictBetRows = strictBets.Count,
+            StrictRules = "edge >= 0.05; book odds >= 1.15; paired no-vig probability required; exclude unpaired exact-rank longshots",
+            TopEdges = bets.Select(ToTopEdge).ToList(),
+            StrictTopEdges = strictBets.Take(50).Select(ToTopEdge).ToList()
         };
+    }
+
+    private static GroupMarketTopEdge ToTopEdge(GroupMarketComparisonRow x)
+        => new()
+        {
+            Market = x.Market,
+            ReportGroupCode = x.ReportGroupCode,
+            MarketGroupCode = x.MarketGroupCode,
+            OriginalMarketGroupCode = x.OriginalMarketGroupCode,
+            SimulationGroupCode = x.SimulationGroupCode,
+            Selection = x.Selection,
+            Side = x.Side,
+            Opponent = x.Opponent,
+            BookOdds = x.BookOdds,
+            SimulationProbability = x.SimulationProbability,
+            BookProbabilityUsed = x.BookProbabilityUsed,
+            EdgeProbability = x.EdgeProbability,
+            Decision = x.Decision
+        };
+
+    private static bool IsStrictBet(GroupMarketComparisonRow row)
+    {
+        if (!string.Equals(row.Decision, "BET", StringComparison.OrdinalIgnoreCase)) return false;
+        if (row.EdgeProbability is null or < 0.05) return false;
+        if (row.BookOdds is null or < 1.15) return false;
+        if (row.PairedBookOdds is null or <= 1.0) return false;
+        if (row.BookProbabilityNoVig is null) return false;
+
+        // Exact-rank longshots are only allowed in the strict report when both sides exist.
+        // This avoids treating one-sided/unpaired longshot prices as reliable edges.
+        if (row.Market.StartsWith("ExactRank", StringComparison.OrdinalIgnoreCase) && row.PairedBookOdds is null)
+            return false;
+
+        return true;
     }
 
     private static async Task WriteAsync(GroupMarketComparisonResult result, string outputFolder, bool overwrite, CancellationToken cancellationToken)
@@ -363,15 +386,30 @@ public sealed class GroupMarketOddsComparer
         Directory.CreateDirectory(outputFolder);
         var jsonPath = Path.Combine(outputFolder, "group-market-comparison-summary.json");
         var csvPath = Path.Combine(outputFolder, "group-market-comparison.csv");
+        var strictCsvPath = Path.Combine(outputFolder, "group-market-comparison-bets-strict.csv");
 
         if (File.Exists(jsonPath) && !overwrite) throw new IOException($"File already exists: {jsonPath}. Use --overwrite.");
         if (File.Exists(csvPath) && !overwrite) throw new IOException($"File already exists: {csvPath}. Use --overwrite.");
+        if (File.Exists(strictCsvPath) && !overwrite) throw new IOException($"File already exists: {strictCsvPath}. Use --overwrite.");
 
         await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(result, JsonOptions), cancellationToken);
-        await using var writer = new StreamWriter(csvPath);
+
+        await WriteRowsCsvAsync(csvPath, result.Rows
+            .OrderByDescending(x => x.Decision == "BET")
+            .ThenByDescending(x => x.EdgeProbability), cancellationToken);
+
+        await WriteRowsCsvAsync(strictCsvPath, result.Rows
+            .Where(IsStrictBet)
+            .OrderByDescending(x => x.EdgeProbability), cancellationToken);
+    }
+
+    private static async Task WriteRowsCsvAsync(string path, IEnumerable<GroupMarketComparisonRow> rows, CancellationToken cancellationToken)
+    {
+        await using var writer = new StreamWriter(path);
         await writer.WriteLineAsync("source_market_type,report_group_code,market_group_code,original_market_group_code,simulation_group_code,market,selection,side,opponent,book_odds,paired_book_odds,book_probability_raw,book_probability_no_vig,book_probability_used,simulation_probability,fair_odds,edge_probability,edge_percent,decision,source_image,notes");
-        foreach (var r in result.Rows.OrderByDescending(x => x.Decision == "BET").ThenByDescending(x => x.EdgeProbability))
+        foreach (var r in rows)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var values = new[]
             {
                 r.SourceMarketType, r.ReportGroupCode, r.MarketGroupCode, r.OriginalMarketGroupCode, r.SimulationGroupCode, r.Market, r.Selection, r.Side, r.Opponent,
@@ -462,7 +500,10 @@ public sealed class GroupMarketComparisonSummary
     public int BetRows { get; init; }
     public int LeanRows { get; init; }
     public int NoBetRows { get; init; }
+    public int StrictBetRows { get; init; }
+    public string StrictRules { get; init; } = string.Empty;
     public List<GroupMarketTopEdge> TopEdges { get; init; } = [];
+    public List<GroupMarketTopEdge> StrictTopEdges { get; init; } = [];
 }
 
 public sealed record GroupMarketComparisonRow
