@@ -122,7 +122,9 @@ internal static class CliApplication
             var calendarBuilder = new Wc2026CalendarModelBuilder();
             var calendar = calendarBuilder.BuildFromSofascoreFolder(sofascoreFolder);
             await calendarBuilder.WriteAsync(calendar, outputFolder, overwrite, cancellationToken);
+            var groups = calendarBuilder.BuildGroups(calendar);
             Console.WriteLine($"  Matches: {calendar.Matches.Count}");
+            Console.WriteLine($"  Groups: {groups.Groups.Count}");
             Console.WriteLine($"  Output: {Path.Combine(outputFolder, "calendar")}");
         }
 
@@ -244,7 +246,7 @@ internal static class CliApplication
         Console.WriteLine("  --player-ratings-file <path>   EAFC26-Men.csv or EAFC26-Men.zip from Kaggle");
         Console.WriteLine("  --models-folder <path>         Output model folder. Alias: --output-folder. Default: data/models");
         Console.WriteLine("  --overwrite                    Overwrite existing model files");
-        Console.WriteLine("  --skip-calendar                Do not build calendar model set");
+        Console.WriteLine("  --skip-calendar                Do not build calendar/group model sets");
         Console.WriteLine("  --skip-player-ratings          Do not build player-ratings model set");
         Console.WriteLine("  --validate <true|false>        Run validation after build. Default: true");
         Console.WriteLine();

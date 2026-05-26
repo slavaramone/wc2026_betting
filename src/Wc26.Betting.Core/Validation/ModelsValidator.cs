@@ -19,15 +19,20 @@ public sealed class ModelsValidator
         }
 
         var calendarPath = Path.Combine(modelsFolder, "calendar", "wc2026-calendar.json");
+        var groupsPath = Path.Combine(modelsFolder, "calendar", "wc2026-groups.json");
         var playerPath = Path.Combine(modelsFolder, "player-ratings", "eafc26-men-player-ratings.json");
         var seedsPath = Path.Combine(modelsFolder, "player-ratings", "eafc26-nation-rating-seeds.json");
 
         Wc2026CalendarSet? calendar = null;
+        Wc2026GroupSet? groups = null;
         EaFcPlayerRatingSet? ratings = null;
         List<NationRatingSeed>? seeds = null;
 
         if (!File.Exists(calendarPath)) report.Errors.Add($"Missing calendar model: {calendarPath}");
         else calendar = await ReadAsync<Wc2026CalendarSet>(calendarPath, report, cancellationToken);
+
+        if (!File.Exists(groupsPath)) report.Errors.Add($"Missing group model: {groupsPath}. Re-run build-models to create it.");
+        else groups = await ReadAsync<Wc2026GroupSet>(groupsPath, report, cancellationToken);
 
         if (!File.Exists(playerPath)) report.Errors.Add($"Missing EA player ratings model: {playerPath}");
         else ratings = await ReadAsync<EaFcPlayerRatingSet>(playerPath, report, cancellationToken);
@@ -36,6 +41,7 @@ public sealed class ModelsValidator
         else seeds = await ReadAsync<List<NationRatingSeed>>(seedsPath, report, cancellationToken);
 
         if (calendar is not null) ValidateCalendar(calendar, report);
+        if (groups is not null) ValidateGroups(groups, calendar, report);
         if (ratings is not null) ValidateRatings(ratings, report);
         if (calendar is not null && ratings is not null) ValidateCalendarTeamCoverage(calendar, ratings, seeds, report);
 
@@ -109,6 +115,80 @@ public sealed class ModelsValidator
             .ToList();
         if (invalidTimes.Count > 0)
             report.Warnings.Add($"Calendar has start times outside 2026: {string.Join(", ", invalidTimes)}");
+    }
+
+
+    private static void ValidateGroups(Wc2026GroupSet groups, Wc2026CalendarSet? calendar, ModelValidationReport report)
+    {
+        report.Info.Add($"Calendar groups: {groups.Groups.Count}");
+
+        if (groups.Groups.Count == 0)
+        {
+            report.Errors.Add("Group model has zero groups.");
+            return;
+        }
+
+        if (groups.Groups.Count != 12)
+            report.Warnings.Add($"Expected 12 WC2026 groups; current group model has {groups.Groups.Count}.");
+
+        var duplicateCodes = groups.Groups
+            .GroupBy(x => x.GroupCode, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToList();
+        if (duplicateCodes.Count > 0)
+            report.Errors.Add($"Duplicate group codes: {string.Join(", ", duplicateCodes)}");
+
+        var teams = groups.Groups.SelectMany(x => x.Teams.Select(t => t.TeamName)).ToList();
+        var duplicateTeams = teams
+            .GroupBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .Take(20)
+            .ToList();
+        if (duplicateTeams.Count > 0)
+            report.Errors.Add($"Teams assigned to multiple groups: {string.Join(", ", duplicateTeams)}");
+
+        var totalGroupTeams = teams.Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var totalGroupMatches = groups.Groups.Sum(x => x.Matches.Count);
+        report.Info.Add($"Group model teams: {totalGroupTeams}; group matches: {totalGroupMatches}");
+
+        foreach (var group in groups.Groups.OrderBy(x => x.GroupCode, StringComparer.OrdinalIgnoreCase))
+        {
+            if (group.Teams.Count != 4)
+                report.Warnings.Add($"Group {group.GroupCode} has {group.Teams.Count} teams, expected 4.");
+            if (group.Matches.Count != 6)
+                report.Warnings.Add($"Group {group.GroupCode} has {group.Matches.Count} matches, expected 6.");
+
+            var badTeamMatchCounts = group.Teams.Where(x => x.MatchCount != 3).Select(x => $"{x.TeamName}={x.MatchCount}").ToList();
+            if (badTeamMatchCounts.Count > 0)
+                report.Warnings.Add($"Group {group.GroupCode} teams not playing 3 group matches: {string.Join(", ", badTeamMatchCounts)}.");
+
+            var duplicateMatchIds = group.Matches
+                .GroupBy(x => x.EventId)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .ToList();
+            if (duplicateMatchIds.Count > 0)
+                report.Errors.Add($"Group {group.GroupCode} duplicate match ids: {string.Join(", ", duplicateMatchIds)}");
+        }
+
+        if (calendar is not null)
+        {
+            var calendarGroupMatchIds = calendar.Matches
+                .Where(x => x.Stage == "group_stage" && x.HasKnownTeams)
+                .Select(x => x.EventId)
+                .ToHashSet();
+            var modelGroupMatchIds = groups.Groups.SelectMany(x => x.Matches).Select(x => x.EventId).ToHashSet();
+
+            var missingFromGroupModel = calendarGroupMatchIds.Except(modelGroupMatchIds).Take(20).ToList();
+            var unknownInGroupModel = modelGroupMatchIds.Except(calendarGroupMatchIds).Take(20).ToList();
+
+            if (missingFromGroupModel.Count > 0)
+                report.Errors.Add($"Group-stage calendar matches missing from group model: {string.Join(", ", missingFromGroupModel)}");
+            if (unknownInGroupModel.Count > 0)
+                report.Errors.Add($"Group model contains match ids not present in known group-stage calendar: {string.Join(", ", unknownInGroupModel)}");
+        }
     }
 
     private static void ValidateRatings(EaFcPlayerRatingSet ratings, ModelValidationReport report)

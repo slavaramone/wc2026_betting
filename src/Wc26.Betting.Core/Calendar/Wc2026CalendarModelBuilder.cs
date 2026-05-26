@@ -75,6 +75,124 @@ public sealed class Wc2026CalendarModelBuilder
 
         await WriteJsonAsync(Path.Combine(folder, "wc2026-calendar.json"), set, overwrite, cancellationToken);
         await WriteCalendarCsvAsync(Path.Combine(folder, "wc2026-calendar.csv"), set, overwrite, cancellationToken);
+
+        var groups = BuildGroups(set);
+        await WriteJsonAsync(Path.Combine(folder, "wc2026-groups.json"), groups, overwrite, cancellationToken);
+        await WriteGroupsCsvAsync(Path.Combine(folder, "wc2026-groups.csv"), groups, overwrite, cancellationToken);
+        await WriteGroupMatchesCsvAsync(Path.Combine(folder, "wc2026-group-matches.csv"), groups, overwrite, cancellationToken);
+    }
+
+    public Wc2026GroupSet BuildGroups(Wc2026CalendarSet calendar)
+    {
+        var groupStageMatches = calendar.Matches
+            .Where(x => x.Stage == "group_stage" && x.HasKnownTeams)
+            .OrderBy(x => x.StartUtc ?? DateTimeOffset.MaxValue)
+            .ThenBy(x => x.EventId)
+            .ToList();
+
+        var adjacency = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var match in groupStageMatches)
+        {
+            AddEdge(adjacency, match.HomeTeam, match.AwayTeam);
+            AddEdge(adjacency, match.AwayTeam, match.HomeTeam);
+        }
+
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var components = new List<List<string>>();
+        foreach (var team in adjacency.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+        {
+            if (!visited.Add(team))
+                continue;
+
+            var component = new List<string>();
+            var queue = new Queue<string>();
+            queue.Enqueue(team);
+
+            while (queue.Count > 0)
+            {
+                var current = queue.Dequeue();
+                component.Add(current);
+
+                foreach (var next in adjacency[current].OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (visited.Add(next))
+                        queue.Enqueue(next);
+                }
+            }
+
+            components.Add(component.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList());
+        }
+
+        var orderedComponents = components
+            .Select(component => new
+            {
+                Teams = component,
+                Matches = groupStageMatches
+                    .Where(m => component.Contains(m.HomeTeam, StringComparer.OrdinalIgnoreCase)
+                        && component.Contains(m.AwayTeam, StringComparer.OrdinalIgnoreCase))
+                    .OrderBy(m => m.StartUtc ?? DateTimeOffset.MaxValue)
+                    .ThenBy(m => m.EventId)
+                    .ToList()
+            })
+            .OrderBy(x => x.Matches.FirstOrDefault()?.StartUtc ?? DateTimeOffset.MaxValue)
+            .ThenBy(x => string.Join("|", x.Teams), StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var groups = new List<Wc2026Group>();
+        for (var i = 0; i < orderedComponents.Count; i++)
+        {
+            var component = orderedComponents[i];
+            var groupCode = i < 12 ? ((char)('A' + i)).ToString() : $"X{i + 1}";
+            var teams = component.Teams
+                .Select(team => new Wc2026GroupTeam
+                {
+                    TeamName = team,
+                    MatchCount = component.Matches.Count(m => string.Equals(m.HomeTeam, team, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(m.AwayTeam, team, StringComparison.OrdinalIgnoreCase)),
+                    Opponents = component.Matches
+                        .Where(m => string.Equals(m.HomeTeam, team, StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(m.AwayTeam, team, StringComparison.OrdinalIgnoreCase))
+                        .Select(m => string.Equals(m.HomeTeam, team, StringComparison.OrdinalIgnoreCase) ? m.AwayTeam : m.HomeTeam)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                        .ToList()
+                })
+                .OrderBy(x => x.TeamName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            groups.Add(new Wc2026Group
+            {
+                GroupCode = groupCode,
+                FirstMatchUtc = component.Matches.FirstOrDefault()?.StartUtc,
+                Teams = teams,
+                Matches = component.Matches.Select(m => new Wc2026GroupMatch
+                {
+                    EventId = m.EventId,
+                    StartUtc = m.StartUtc,
+                    RoundNumber = m.RoundNumber,
+                    HomeTeam = m.HomeTeam,
+                    AwayTeam = m.AwayTeam,
+                    StatusType = m.StatusType
+                }).ToList()
+            });
+        }
+
+        return new Wc2026GroupSet
+        {
+            SourceCalendarFile = "calendar/wc2026-calendar.json",
+            Groups = groups
+        };
+    }
+
+    private static void AddEdge(Dictionary<string, HashSet<string>> adjacency, string from, string to)
+    {
+        if (!adjacency.TryGetValue(from, out var set))
+        {
+            set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            adjacency[from] = set;
+        }
+
+        set.Add(to);
     }
 
     private static async Task WriteJsonAsync<T>(string path, T value, bool overwrite, CancellationToken cancellationToken)
@@ -110,6 +228,56 @@ public sealed class Wc2026CalendarModelBuilder
                 m.SourceCalendarFile
             };
             await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+        }
+    }
+
+
+    private static async Task WriteGroupsCsvAsync(string path, Wc2026GroupSet set, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"File already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("group_code,team_name,match_count,opponents");
+        foreach (var group in set.Groups.OrderBy(x => x.GroupCode, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var team in group.Teams.OrderBy(x => x.TeamName, StringComparer.OrdinalIgnoreCase))
+            {
+                var values = new[]
+                {
+                    group.GroupCode,
+                    team.TeamName,
+                    team.MatchCount.ToString(),
+                    string.Join('|', team.Opponents)
+                };
+                await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+            }
+        }
+    }
+
+    private static async Task WriteGroupMatchesCsvAsync(string path, Wc2026GroupSet set, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"File already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("group_code,event_id,start_utc,round_number,home_team,away_team,status_type");
+        foreach (var group in set.Groups.OrderBy(x => x.GroupCode, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var match in group.Matches.OrderBy(x => x.StartUtc ?? DateTimeOffset.MaxValue).ThenBy(x => x.EventId))
+            {
+                var values = new[]
+                {
+                    group.GroupCode,
+                    match.EventId.ToString(),
+                    match.StartUtc?.ToString("O") ?? string.Empty,
+                    match.RoundNumber?.ToString() ?? string.Empty,
+                    match.HomeTeam,
+                    match.AwayTeam,
+                    match.StatusType
+                };
+                await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+            }
         }
     }
 
