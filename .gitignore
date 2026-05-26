@@ -1,0 +1,9 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.tmp
+data/raw/**
+!data/raw/.gitkeep
+!data/raw/sofascore/.gitkeep
