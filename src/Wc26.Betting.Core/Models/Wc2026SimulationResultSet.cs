@@ -3,7 +3,7 @@ namespace Wc26.Betting.Core.Models;
 public sealed class Wc2026SimulationResultSet
 {
     public DateTimeOffset BuiltAtUtc { get; init; } = DateTimeOffset.UtcNow;
-    public string SourceKind { get; init; } = "monte_carlo_group_stage_skeleton";
+    public string SourceKind { get; init; } = "monte_carlo_group_and_knockout_skeleton";
     public int Iterations { get; init; }
     public int Seed { get; init; }
     public string ModelsFolder { get; init; } = string.Empty;
@@ -11,9 +11,24 @@ public sealed class Wc2026SimulationResultSet
     public double EloWeight { get; init; }
     public double EaWeight { get; init; }
     public string Notes { get; init; } = string.Empty;
+    public bool KnockoutSimulated { get; init; }
+    public string KnockoutBracketSource { get; init; } = string.Empty;
+    public List<Wc2026KnockoutBracketRuleSummary> KnockoutBracketRules { get; init; } = [];
     public List<Wc2026SimulationTeamSummary> Teams { get; init; } = [];
     public List<Wc2026SimulationGroupSummary> Groups { get; init; } = [];
     public List<Wc2026SimulationPairComparisonSummary> PairComparisons { get; init; } = [];
+}
+
+
+public sealed class Wc2026KnockoutBracketRuleSummary
+{
+    public int MatchNumber { get; init; }
+    public string Stage { get; init; } = string.Empty;
+    public string Source { get; init; } = string.Empty;
+    public string Slot1 { get; init; } = string.Empty;
+    public string Slot2 { get; init; } = string.Empty;
+    public string Slot1Groups { get; init; } = string.Empty;
+    public string Slot2Groups { get; init; } = string.Empty;
 }
 
 public sealed class Wc2026SimulationPairComparisonSummary
@@ -44,6 +59,11 @@ public sealed class Wc2026SimulationTeamSummary
     public double ThirdPlaceQualifiedProbability { get; init; }
     public double QualifiedToRoundOf32Probability { get; init; }
     public double EliminatedInGroupProbability { get; init; }
+    public double ReachRoundOf16Probability { get; init; }
+    public double ReachQuarterFinalProbability { get; init; }
+    public double ReachSemiFinalProbability { get; init; }
+    public double ReachFinalProbability { get; init; }
+    public double WinnerProbability { get; init; }
 }
 
 public sealed class Wc2026SimulationGroupSummary

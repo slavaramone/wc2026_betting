@@ -58,11 +58,12 @@ public sealed class Wc2026SimulationRunner
             throw new DirectoryNotFoundException($"Models folder not found: {modelsFolder}");
 
         var groups = await ReadRequiredAsync<Wc2026GroupSet>(Path.Combine(modelsFolder, "calendar", "wc2026-groups.json"), cancellationToken);
+        var calendar = await TryReadAsync<Wc2026CalendarSet>(Path.Combine(modelsFolder, "calendar", "wc2026-calendar.json"), cancellationToken);
         var odds = await ReadRequiredAsync<GameOddsSet>(Path.Combine(modelsFolder, "odds", "game-odds.json"), cancellationToken);
         var elo = await ReadRequiredAsync<EloRatingSet>(Path.Combine(modelsFolder, "team-ratings", "hardcoded-elo-ratings.json"), cancellationToken);
         var seeds = await ReadRequiredAsync<List<NationRatingSeed>>(Path.Combine(modelsFolder, "player-ratings", "eafc26-nation-rating-seeds.json"), cancellationToken);
 
-        var result = Run(groups, odds, elo, seeds, modelsFolder, iterations, seed, weights);
+        var result = Run(groups, odds, elo, seeds, modelsFolder, iterations, seed, weights, calendar);
 
         var destination = outputFolder ?? Path.Combine(modelsFolder, "simulation");
         await WriteAsync(result, destination, overwrite, cancellationToken);
@@ -77,7 +78,8 @@ public sealed class Wc2026SimulationRunner
         string modelsFolder,
         int iterations,
         int seed,
-        Wc2026SimulationWeights? weights = null)
+        Wc2026SimulationWeights? weights = null,
+        Wc2026CalendarSet? calendar = null)
     {
         var activeWeights = weights ?? DefaultWeights;
         activeWeights.Validate();
@@ -91,6 +93,7 @@ public sealed class Wc2026SimulationRunner
             .ToList();
 
         var accum = allTeams.ToDictionary(x => x.Team, x => new TeamAccum(x.Team, x.GroupCode), StringComparer.OrdinalIgnoreCase);
+        var knockoutRules = BuildKnockoutBracketRules(calendar, groups);
         var pairHigherCounts = new Dictionary<(string Higher, string Lower), int>(StringTupleComparer.OrdinalIgnoreCase);
         var oddsByEventId = odds.Matches
             .Where(x => x.CalendarEventId is not null)
@@ -106,6 +109,7 @@ public sealed class Wc2026SimulationRunner
         for (var i = 0; i < iterations; i++)
         {
             var thirdPlaced = new List<GroupStandingRow>();
+            var rankedByGroup = new Dictionary<string, List<GroupStandingRow>>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var group in groups.Groups.OrderBy(x => x.GroupCode, StringComparer.OrdinalIgnoreCase))
             {
@@ -120,6 +124,7 @@ public sealed class Wc2026SimulationRunner
                 }
 
                 var ranked = RankGroup(table.Values.ToList(), playedMatches, rng);
+                rankedByGroup[group.GroupCode] = ranked;
                 for (var rankIndex = 0; rankIndex < ranked.Count; rankIndex++)
                 {
                     var rank = rankIndex + 1;
@@ -152,6 +157,8 @@ public sealed class Wc2026SimulationRunner
             var qualifiedThirds = RankThirdPlacedTeams(thirdPlaced, rng).Take(8).ToList();
             foreach (var row in qualifiedThirds)
                 accum[row.Team].ThirdPlaceQualified++;
+
+            SimulateKnockout(rankedByGroup, qualifiedThirds, knockoutRules, accum, eloByTeam, seedByTeam, activeWeights, rng);
         }
 
         var teamSummaries = allTeams.Select(x =>
@@ -177,7 +184,12 @@ public sealed class Wc2026SimulationRunner
                 ThirdPlaceProbability = RoundProbability(a.ThirdPlace, iterations),
                 ThirdPlaceQualifiedProbability = RoundProbability(a.ThirdPlaceQualified, iterations),
                 QualifiedToRoundOf32Probability = RoundProbability(qualified, iterations),
-                EliminatedInGroupProbability = Round(1.0 - (qualified / (double)iterations))
+                EliminatedInGroupProbability = Round(1.0 - (qualified / (double)iterations)),
+                ReachRoundOf16Probability = RoundProbability(a.ReachRoundOf16, iterations),
+                ReachQuarterFinalProbability = RoundProbability(a.ReachQuarterFinal, iterations),
+                ReachSemiFinalProbability = RoundProbability(a.ReachSemiFinal, iterations),
+                ReachFinalProbability = RoundProbability(a.ReachFinal, iterations),
+                WinnerProbability = RoundProbability(a.Winner, iterations)
             };
         })
         .OrderBy(x => x.GroupCode, StringComparer.OrdinalIgnoreCase)
@@ -247,11 +259,223 @@ public sealed class Wc2026SimulationRunner
             MarketWeight = activeWeights.Market,
             EloWeight = activeWeights.Elo,
             EaWeight = activeWeights.Ea,
-            Notes = $"Group-stage simulation uses blended match probabilities: {activeWeights.Market:P0} normalized market 1X2, {activeWeights.Elo:P0} Elo, {activeWeights.Ea:P0} EA nation strength. Ranks groups with FIFA-style MVP tiebreakers and selects 8 best third-place teams. Knockout bracket is not simulated yet.",
+            KnockoutSimulated = true,
+            KnockoutBracketSource = knockoutRules.Source,
+            KnockoutBracketRules = knockoutRules.Rules.Select(r => new Wc2026KnockoutBracketRuleSummary
+            {
+                MatchNumber = r.MatchNumber,
+                Stage = "round_of_32",
+                Source = r.Source,
+                Slot1 = r.Slot1.Raw,
+                Slot2 = r.Slot2.Raw,
+                Slot1Groups = string.Join("|", r.Slot1.Groups),
+                Slot2Groups = string.Join("|", r.Slot2.Groups)
+            }).ToList(),
+            Notes = $"Group-stage simulation uses blended match probabilities: {activeWeights.Market:P0} normalized market 1X2, {activeWeights.Elo:P0} Elo, {activeWeights.Ea:P0} EA nation strength. Ranks groups with FIFA-style MVP tiebreakers and selects 8 best third-place teams. Knockout skeleton maps R32 slots via {knockoutRules.Source}; later knockout rounds are paired sequentially.",
             Teams = teamSummaries,
             Groups = groupSummaries,
             PairComparisons = pairSummaries
         };
+    }
+
+
+    private static void SimulateKnockout(
+        IReadOnlyDictionary<string, List<GroupStandingRow>> rankedByGroup,
+        IReadOnlyList<GroupStandingRow> qualifiedThirds,
+        KnockoutBracketPlan bracket,
+        IReadOnlyDictionary<string, TeamAccum> accum,
+        IReadOnlyDictionary<string, EloTeamRating> eloByTeam,
+        IReadOnlyDictionary<string, NationRatingSeed> seedByTeam,
+        Wc2026SimulationWeights weights,
+        Random rng)
+    {
+        var usedThirdGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var roundOf32Teams = new List<(string Team1, string Team2)>();
+
+        foreach (var rule in bracket.Rules.OrderBy(x => x.MatchNumber))
+        {
+            var team1 = ResolveBracketSlot(rule.Slot1, rankedByGroup, qualifiedThirds, usedThirdGroups);
+            var team2 = ResolveBracketSlot(rule.Slot2, rankedByGroup, qualifiedThirds, usedThirdGroups);
+            if (!string.IsNullOrWhiteSpace(team1) && !string.IsNullOrWhiteSpace(team2) && !string.Equals(team1, team2, StringComparison.OrdinalIgnoreCase))
+                roundOf32Teams.Add((team1, team2));
+        }
+
+        var roundOf16 = SimulateKnockoutRound(roundOf32Teams, accum, a => a.ReachRoundOf16++, eloByTeam, seedByTeam, weights, rng);
+        var quarterFinal = SimulateKnockoutRound(PairSequentially(roundOf16), accum, a => a.ReachQuarterFinal++, eloByTeam, seedByTeam, weights, rng);
+        var semiFinal = SimulateKnockoutRound(PairSequentially(quarterFinal), accum, a => a.ReachSemiFinal++, eloByTeam, seedByTeam, weights, rng);
+        var final = SimulateKnockoutRound(PairSequentially(semiFinal), accum, a => a.ReachFinal++, eloByTeam, seedByTeam, weights, rng);
+        var winner = SimulateKnockoutRound(PairSequentially(final), accum, a => a.Winner++, eloByTeam, seedByTeam, weights, rng);
+    }
+
+    private static List<string> SimulateKnockoutRound(
+        IReadOnlyList<(string Team1, string Team2)> matches,
+        IReadOnlyDictionary<string, TeamAccum> accum,
+        Action<TeamAccum> incrementWinnerStage,
+        IReadOnlyDictionary<string, EloTeamRating> eloByTeam,
+        IReadOnlyDictionary<string, NationRatingSeed> seedByTeam,
+        Wc2026SimulationWeights weights,
+        Random rng)
+    {
+        var winners = new List<string>();
+        foreach (var (team1, team2) in matches)
+        {
+            var winner = SimulateKnockoutWinner(team1, team2, eloByTeam, seedByTeam, weights, rng);
+            winners.Add(winner);
+            if (accum.TryGetValue(winner, out var teamAccum))
+                incrementWinnerStage(teamAccum);
+        }
+        return winners;
+    }
+
+    private static List<(string Team1, string Team2)> PairSequentially(IReadOnlyList<string> teams)
+    {
+        var pairs = new List<(string Team1, string Team2)>();
+        for (var i = 0; i + 1 < teams.Count; i += 2)
+            pairs.Add((teams[i], teams[i + 1]));
+        return pairs;
+    }
+
+    private static string SimulateKnockoutWinner(
+        string team1,
+        string team2,
+        IReadOnlyDictionary<string, EloTeamRating> eloByTeam,
+        IReadOnlyDictionary<string, NationRatingSeed> seedByTeam,
+        Wc2026SimulationWeights weights,
+        Random rng)
+    {
+        // Knockout stage has no 1X2 market prices in this MVP. Passing null odds makes the
+        // blend automatically renormalize to Elo + EA only. Draw probability is converted
+        // into extra-time/penalty coin-flip probability.
+        var p = BlendedMatchProbabilities(team1, team2, null, eloByTeam, seedByTeam, weights);
+        var team1Advance = p.HomeWin + (0.5 * p.Draw);
+        return rng.NextDouble() < team1Advance ? team1 : team2;
+    }
+
+    private static string? ResolveBracketSlot(
+        KnockoutSlotSpec slot,
+        IReadOnlyDictionary<string, List<GroupStandingRow>> rankedByGroup,
+        IReadOnlyList<GroupStandingRow> qualifiedThirds,
+        ISet<string> usedThirdGroups)
+    {
+        if (slot.Rank is 1 or 2)
+        {
+            foreach (var group in slot.Groups)
+            {
+                if (rankedByGroup.TryGetValue(group, out var ranked) && ranked.Count >= slot.Rank.Value)
+                    return ranked[slot.Rank.Value - 1].Team;
+            }
+            return null;
+        }
+
+        if (slot.Rank == 3)
+        {
+            foreach (var row in qualifiedThirds)
+            {
+                if (usedThirdGroups.Contains(row.GroupCode))
+                    continue;
+                if (slot.Groups.Count == 0 || slot.Groups.Contains(row.GroupCode, StringComparer.OrdinalIgnoreCase))
+                {
+                    usedThirdGroups.Add(row.GroupCode);
+                    return row.Team;
+                }
+            }
+
+            foreach (var row in qualifiedThirds)
+            {
+                if (usedThirdGroups.Add(row.GroupCode))
+                    return row.Team;
+            }
+        }
+
+        return null;
+    }
+
+    private static KnockoutBracketPlan BuildKnockoutBracketRules(Wc2026CalendarSet? calendar, Wc2026GroupSet groups)
+    {
+        var fromCalendar = calendar?.Matches
+            .Where(m => string.Equals(m.Stage, "round_of_32", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(m => m.StartUtc ?? DateTimeOffset.MaxValue)
+            .ThenBy(m => m.EventId)
+            .Select((m, index) => new KnockoutBracketRule(
+                MatchNumber: index + 1,
+                Source: "sofascore_calendar_round_of_32",
+                Slot1: ParseKnockoutSlot(m.HomeTeam),
+                Slot2: ParseKnockoutSlot(m.AwayTeam)))
+            .Where(r => r.Slot1.Rank is not null && r.Slot2.Rank is not null)
+            .ToList() ?? [];
+
+        if (fromCalendar.Count == 16)
+            return new KnockoutBracketPlan("sofascore_calendar_round_of_32_placeholders", fromCalendar);
+
+        return new KnockoutBracketPlan("hardcoded_mvp_fallback_bracket", BuildFallbackRoundOf32Rules(groups));
+    }
+
+    private static List<KnockoutBracketRule> BuildFallbackRoundOf32Rules(Wc2026GroupSet groups)
+    {
+        var codes = groups.Groups.Select(g => g.GroupCode).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Take(12).ToList();
+        string Code(int index) => index < codes.Count ? codes[index] : ((char)('A' + index)).ToString();
+
+        var raw = new (string Slot1, string Slot2)[]
+        {
+            ($"1{Code(0)}", $"3{Code(0)}/{Code(1)}/{Code(2)}/{Code(3)}"),
+            ($"1{Code(1)}", $"3{Code(4)}/{Code(5)}/{Code(6)}/{Code(7)}"),
+            ($"1{Code(2)}", $"3{Code(8)}/{Code(9)}/{Code(10)}/{Code(11)}"),
+            ($"1{Code(3)}", $"3{Code(0)}/{Code(4)}/{Code(8)}/{Code(11)}"),
+            ($"1{Code(4)}", $"3{Code(1)}/{Code(5)}/{Code(9)}/{Code(10)}"),
+            ($"1{Code(5)}", $"3{Code(2)}/{Code(6)}/{Code(7)}/{Code(11)}"),
+            ($"1{Code(6)}", $"3{Code(3)}/{Code(7)}/{Code(8)}/{Code(9)}"),
+            ($"1{Code(7)}", $"3{Code(0)}/{Code(5)}/{Code(6)}/{Code(10)}"),
+            ($"1{Code(8)}", $"2{Code(9)}"),
+            ($"1{Code(9)}", $"2{Code(8)}"),
+            ($"1{Code(10)}", $"2{Code(11)}"),
+            ($"1{Code(11)}", $"2{Code(10)}"),
+            ($"2{Code(0)}", $"2{Code(1)}"),
+            ($"2{Code(2)}", $"2{Code(3)}"),
+            ($"2{Code(4)}", $"2{Code(5)}"),
+            ($"2{Code(6)}", $"2{Code(7)}")
+        };
+
+        return raw.Select((x, index) => new KnockoutBracketRule(
+            MatchNumber: index + 1,
+            Source: "hardcoded_mvp_fallback_bracket",
+            Slot1: ParseKnockoutSlot(x.Slot1),
+            Slot2: ParseKnockoutSlot(x.Slot2))).ToList();
+    }
+
+    private static KnockoutSlotSpec ParseKnockoutSlot(string raw)
+    {
+        var value = (raw ?? string.Empty).Trim().ToUpperInvariant().Replace(" ", string.Empty);
+        if (string.IsNullOrWhiteSpace(value))
+            return new KnockoutSlotSpec(raw, null, []);
+
+        var rank = TryParseRank(value);
+        var groups = ExtractGroupCodes(value);
+        return new KnockoutSlotSpec(raw, rank, groups);
+    }
+
+    private static int? TryParseRank(string value)
+    {
+        foreach (var ch in value)
+        {
+            if (ch is '1' or '2' or '3')
+                return ch - '0';
+        }
+        return null;
+    }
+
+    private static List<string> ExtractGroupCodes(string value)
+    {
+        var groups = new List<string>();
+        foreach (var ch in value)
+        {
+            if (ch >= 'A' && ch <= 'L')
+            {
+                var group = ch.ToString();
+                if (!groups.Contains(group, StringComparer.OrdinalIgnoreCase))
+                    groups.Add(group);
+            }
+        }
+        return groups;
     }
 
     private static SimulatedMatchResult SimulateMatch(
@@ -487,6 +711,14 @@ public sealed class Wc2026SimulationRunner
         };
     }
 
+    private static async Task<T?> TryReadAsync<T>(string path, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(path))
+            return default;
+        var json = await File.ReadAllTextAsync(path, cancellationToken);
+        return JsonSerializer.Deserialize<T>(json, JsonOptions);
+    }
+
     private static async Task<T> ReadRequiredAsync<T>(string path, CancellationToken cancellationToken)
     {
         if (!File.Exists(path))
@@ -503,6 +735,8 @@ public sealed class Wc2026SimulationRunner
         await WriteTeamCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-team-probabilities.csv"), result, overwrite, cancellationToken);
         await WriteGroupCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-group-probabilities.csv"), result, overwrite, cancellationToken);
         await WritePairComparisonCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-pair-comparisons.csv"), result, overwrite, cancellationToken);
+        await WriteStageProbabilityCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-stage-probabilities.csv"), result, overwrite, cancellationToken);
+        await WriteKnockoutBracketRulesCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-knockout-bracket-rules.csv"), result, overwrite, cancellationToken);
     }
 
     private static async Task WriteJsonAsync<T>(string path, T value, bool overwrite, CancellationToken cancellationToken)
@@ -518,7 +752,7 @@ public sealed class Wc2026SimulationRunner
             throw new IOException($"File already exists: {path}. Use --overwrite.");
 
         await using var writer = new StreamWriter(path);
-        await writer.WriteLineAsync("team,group_code,elo_rating,ea_top11_rating,ea_top26_rating,ea_confidence,avg_points,avg_goals_for,avg_goals_against,avg_goal_difference,win_group_probability,top_two_probability,third_place_probability,third_place_qualified_probability,qualified_to_round_of_32_probability,eliminated_in_group_probability");
+        await writer.WriteLineAsync("team,group_code,elo_rating,ea_top11_rating,ea_top26_rating,ea_confidence,avg_points,avg_goals_for,avg_goals_against,avg_goal_difference,win_group_probability,top_two_probability,third_place_probability,third_place_qualified_probability,qualified_to_round_of_32_probability,reach_round_of_16_probability,reach_quarter_final_probability,reach_semi_final_probability,reach_final_probability,winner_probability,eliminated_in_group_probability");
         foreach (var t in result.Teams)
         {
             var values = new[]
@@ -526,7 +760,10 @@ public sealed class Wc2026SimulationRunner
                 t.Team, t.GroupCode, t.EloRating.ToString(), t.EaTop11Rating.ToString("0.###"), t.EaTop26Rating.ToString("0.###"), t.EaConfidence,
                 t.AvgPoints.ToString("0.###"), t.AvgGoalsFor.ToString("0.###"), t.AvgGoalsAgainst.ToString("0.###"), t.AvgGoalDifference.ToString("0.###"),
                 t.WinGroupProbability.ToString("0.######"), t.TopTwoProbability.ToString("0.######"), t.ThirdPlaceProbability.ToString("0.######"),
-                t.ThirdPlaceQualifiedProbability.ToString("0.######"), t.QualifiedToRoundOf32Probability.ToString("0.######"), t.EliminatedInGroupProbability.ToString("0.######")
+                t.ThirdPlaceQualifiedProbability.ToString("0.######"), t.QualifiedToRoundOf32Probability.ToString("0.######"),
+                t.ReachRoundOf16Probability.ToString("0.######"), t.ReachQuarterFinalProbability.ToString("0.######"),
+                t.ReachSemiFinalProbability.ToString("0.######"), t.ReachFinalProbability.ToString("0.######"),
+                t.WinnerProbability.ToString("0.######"), t.EliminatedInGroupProbability.ToString("0.######")
             };
             await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
         }
@@ -573,6 +810,45 @@ public sealed class Wc2026SimulationRunner
         }
     }
 
+
+
+    private static async Task WriteStageProbabilityCsvAsync(string path, Wc2026SimulationResultSet result, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"File already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("team,group_code,qualified_to_round_of_32_probability,reach_round_of_16_probability,reach_quarter_final_probability,reach_semi_final_probability,reach_final_probability,winner_probability");
+        foreach (var t in result.Teams.OrderByDescending(x => x.WinnerProbability).ThenByDescending(x => x.ReachFinalProbability))
+        {
+            var values = new[]
+            {
+                t.Team, t.GroupCode,
+                t.QualifiedToRoundOf32Probability.ToString("0.######"),
+                t.ReachRoundOf16Probability.ToString("0.######"),
+                t.ReachQuarterFinalProbability.ToString("0.######"),
+                t.ReachSemiFinalProbability.ToString("0.######"),
+                t.ReachFinalProbability.ToString("0.######"),
+                t.WinnerProbability.ToString("0.######")
+            };
+            await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+        }
+    }
+
+    private static async Task WriteKnockoutBracketRulesCsvAsync(string path, Wc2026SimulationResultSet result, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"File already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("match_number,stage,source,slot1,slot2,slot1_groups,slot2_groups");
+        foreach (var r in result.KnockoutBracketRules.OrderBy(x => x.MatchNumber))
+        {
+            var values = new[] { r.MatchNumber.ToString(), r.Stage, r.Source, r.Slot1, r.Slot2, r.Slot1Groups, r.Slot2Groups };
+            await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+        }
+    }
+
     private static double Round(double value) => Math.Round(value, 6);
     private static double RoundProbability(int count, int iterations) => Round(count / (double)iterations);
 
@@ -587,6 +863,10 @@ public sealed class Wc2026SimulationRunner
         public int GetHashCode((string First, string Second) obj)
             => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(obj.First), StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Second));
     }
+
+    private sealed record KnockoutBracketPlan(string Source, List<KnockoutBracketRule> Rules);
+    private sealed record KnockoutBracketRule(int MatchNumber, string Source, KnockoutSlotSpec Slot1, KnockoutSlotSpec Slot2);
+    private sealed record KnockoutSlotSpec(string Raw, int? Rank, List<string> Groups);
 
     private sealed record TeamRef(string GroupCode, string Team);
     private sealed record OutcomeProbabilities(double HomeWin, double Draw, double AwayWin);
@@ -622,6 +902,11 @@ public sealed class Wc2026SimulationRunner
         public int TopTwo { get; set; }
         public int ThirdPlace { get; set; }
         public int ThirdPlaceQualified { get; set; }
+        public int ReachRoundOf16 { get; set; }
+        public int ReachQuarterFinal { get; set; }
+        public int ReachSemiFinal { get; set; }
+        public int ReachFinal { get; set; }
+        public int Winner { get; set; }
         public Dictionary<int, int> RankCounts { get; } = new() { [1] = 0, [2] = 0, [3] = 0, [4] = 0 };
     }
 }

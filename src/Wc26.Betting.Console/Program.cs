@@ -227,12 +227,19 @@ internal static class CliApplication
         Console.WriteLine($"Seed: {result.Seed}");
         Console.WriteLine($"Teams: {result.Teams.Count}");
         Console.WriteLine($"Groups: {result.Groups.Count}");
+        Console.WriteLine($"Knockout simulated: {result.KnockoutSimulated}");
+        Console.WriteLine($"Knockout bracket source: {result.KnockoutBracketSource}");
         Console.WriteLine($"Output: {outputFolder}");
 
         Console.WriteLine();
         Console.WriteLine("Top group-winner probabilities:");
         foreach (var team in result.Teams.OrderByDescending(x => x.WinGroupProbability).Take(12))
             Console.WriteLine($"  {team.GroupCode} | {team.Team}: win group {team.WinGroupProbability:P1}, qualify R32 {team.QualifiedToRoundOf32Probability:P1}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top tournament-winner probabilities:");
+        foreach (var team in result.Teams.OrderByDescending(x => x.WinnerProbability).Take(12))
+            Console.WriteLine($"  {team.GroupCode} | {team.Team}: winner {team.WinnerProbability:P1}, final {team.ReachFinalProbability:P1}, semi {team.ReachSemiFinalProbability:P1}");
 
         return 0;
     }
@@ -389,7 +396,7 @@ internal static class CliApplication
         Console.WriteLine("  grab-sofascore    Download WC2026 SofaScore calendar JSONs and event JSONs");
         Console.WriteLine("  build-models      Build file-based model sets from SofaScore JSONs, EAFC26 CSV/ZIP, Elo and odds CSV");
         Console.WriteLine("  validate-models   Run sanity checks on generated model sets");
-        Console.WriteLine("  run-simulation    Run WC2026 group-stage Monte Carlo simulation skeleton");
+        Console.WriteLine("  run-simulation    Run WC2026 group + knockout Monte Carlo simulation skeleton");
         Console.WriteLine("  compare-group-markets  Compare group/final-position market odds against simulation");
         Console.WriteLine("  model-stability-report  Run several simulation blends and report stable market edges");
         Console.WriteLine();
