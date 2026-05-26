@@ -48,6 +48,7 @@ internal static class CliApplication
                 "compare-group-markets" => await RunCompareGroupMarketsAsync(options, cancellationToken),
                 "compare-stage-exit-markets" => await RunCompareStageExitMarketsAsync(options, cancellationToken),
                 "model-stability-report" => await RunModelStabilityReportAsync(options, cancellationToken),
+                "stage-exit-stability-report" => await RunStageExitStabilityReportAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
         }
@@ -369,6 +370,45 @@ internal static class CliApplication
     }
 
 
+    private static async Task<int> RunStageExitStabilityReportAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports", "stage-exit-stability"));
+        var stageExitOddsFile = options.GetAny(["stage-exit-odds-file", "stage-odds-file"], string.Empty);
+        var iterations = options.GetInt("iterations", 10000);
+        var seed = options.GetInt("seed", 2026);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Building stage-exit model stability report...");
+        var reporter = new StageExitMarketStabilityReporter();
+        var report = await reporter.BuildAsync(
+            modelsFolder,
+            stageExitOddsFile,
+            outputFolder,
+            iterations,
+            seed,
+            minEdge,
+            overwrite,
+            cancellationToken);
+
+        Console.WriteLine("STAGE-EXIT STABILITY REPORT RESULT");
+        Console.WriteLine($"Blends: {report.Blends.Count}");
+        foreach (var blend in report.Blends)
+            Console.WriteLine($"  {blend.Label}: BET rows {blend.BetRows}, strict rows {blend.StrictBetRows}");
+        Console.WriteLine($"Candidates appearing as strict in at least one blend: {report.CandidateCount}");
+        Console.WriteLine($"Stable strict candidates across all blends: {report.StableStrictBetCount}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top stable strict stage-exit candidates:");
+        foreach (var c in report.StableStrictBets.Take(15))
+            Console.WriteLine($"  {c.GroupCode} | {c.Market} | {c.Selection} | {c.Side} @ {c.BookOdds:0.###} | strict {c.StrictBlendCount}/{c.BlendCount} | min edge {c.MinEdgeProbability:P1} | avg edge {c.AvgEdgeProbability:P1}");
+
+        return 0;
+    }
+
+
     private static async Task<int> RunValidateModelsAsync(CliOptions options, CancellationToken cancellationToken)
     {
         var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
@@ -437,7 +477,8 @@ internal static class CliApplication
         Console.WriteLine("  run-simulation    Run WC2026 group + knockout Monte Carlo simulation skeleton");
         Console.WriteLine("  compare-group-markets  Compare group/final-position market odds against simulation");
         Console.WriteLine("  compare-stage-exit-markets  Compare stage-exit market odds against knockout simulation");
-        Console.WriteLine("  model-stability-report  Run several simulation blends and report stable market edges");
+        Console.WriteLine("  model-stability-report  Run several simulation blends and report stable group-market edges");
+        Console.WriteLine("  stage-exit-stability-report  Run several simulation blends and report stable stage-exit edges");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore");
@@ -449,6 +490,7 @@ internal static class CliApplication
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- compare-group-markets --models-folder C:\Temp\wc26\models --group-results-odds-file data\raw\odds\wc2026_group_stage_results_market_odds_2026-05-26.csv --finish-higher-odds-file data\raw\odds\wc2026_finish_higher_market_odds_2026-05-26.csv --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- compare-stage-exit-markets --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- model-stability-report --models-folder C:\Temp\wc26\models --group-results-odds-file data\raw\odds\wc2026_group_stage_results_market_odds_2026-05-26.csv --finish-higher-odds-file data\raw\odds\wc2026_finish_higher_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\model-stability --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- stage-exit-stability-report --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\stage-exit-stability --overwrite");
         Console.WriteLine();
         Console.WriteLine("Options for grab-sofascore:");
         Console.WriteLine("  --destination-folder <path>   Output directory. Alias: --output. Default: data/raw/sofascore");
@@ -481,6 +523,16 @@ internal static class CliApplication
         Console.WriteLine("  --group-results-odds-file <path>    Parsed group-stage results market CSV");
         Console.WriteLine("  --finish-higher-odds-file <path>    Parsed finish-higher market CSV");
         Console.WriteLine("  --output-folder <path>              Report output folder. Default: <models-folder>/reports/model-stability");
+        Console.WriteLine("  --iterations <n>                    Monte Carlo iterations per blend. Default: 10000");
+        Console.WriteLine("  --seed <n>                          Random seed for every blend. Default: 2026");
+        Console.WriteLine("  --min-edge <probability>            Base BET threshold for comparison. Default: 0.03");
+        Console.WriteLine("  --overwrite                         Overwrite existing stability files");
+        Console.WriteLine();
+
+        Console.WriteLine("Options for stage-exit-stability-report:");
+        Console.WriteLine("  --models-folder <path>              Folder containing generated model sets. Default: data/models");
+        Console.WriteLine("  --stage-exit-odds-file <path>       Parsed stage-exit market CSV. Alias: --stage-odds-file");
+        Console.WriteLine("  --output-folder <path>              Report output folder. Default: <models-folder>/reports/stage-exit-stability");
         Console.WriteLine("  --iterations <n>                    Monte Carlo iterations per blend. Default: 10000");
         Console.WriteLine("  --seed <n>                          Random seed for every blend. Default: 2026");
         Console.WriteLine("  --min-edge <probability>            Base BET threshold for comparison. Default: 0.03");
