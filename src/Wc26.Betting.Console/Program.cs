@@ -1,6 +1,9 @@
 using Wc26.Betting.Core.Calendar;
+using Wc26.Betting.Core.Models;
+using Wc26.Betting.Core.Odds;
 using Wc26.Betting.Core.Players;
 using Wc26.Betting.Core.Sofascore;
+using Wc26.Betting.Core.Simulation;
 using Wc26.Betting.Core.TeamRatings;
 using Wc26.Betting.Core.Validation;
 
@@ -40,6 +43,7 @@ internal static class CliApplication
                 "grab-sofascore" => await RunGrabSofascoreAsync(options, cancellationToken),
                 "build-models" => await RunBuildModelsAsync(options, cancellationToken),
                 "validate-models" => await RunValidateModelsAsync(options, cancellationToken),
+                "run-simulation" => await RunSimulationAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
         }
@@ -111,12 +115,17 @@ internal static class CliApplication
         var sofascoreFolder = options.Get("sofascore-folder", Path.Combine("data", "raw", "sofascore"));
         var playerRatingsFile = options.GetAny(["player-ratings-file", "ea-ratings-file"], string.Empty);
         var outputFolder = options.GetAny(["models-folder", "output-folder"], Path.Combine("data", "models"));
+        var gameOddsFile = options.GetAny(["game-odds-file", "odds-file"], string.Empty);
         var overwrite = options.GetBool("overwrite", false);
         var skipCalendar = options.GetBool("skip-calendar", false);
         var skipPlayerRatings = options.GetBool("skip-player-ratings", false);
         var skipEloRatings = options.GetBool("skip-elo-ratings", false);
+        var skipGameOdds = options.GetBool("skip-game-odds", false);
 
         Directory.CreateDirectory(outputFolder);
+
+        Wc2026CalendarSet? builtCalendar = null;
+        Wc2026GroupSet? builtGroups = null;
 
         if (!skipCalendar)
         {
@@ -125,6 +134,8 @@ internal static class CliApplication
             var calendar = calendarBuilder.BuildFromSofascoreFolder(sofascoreFolder);
             await calendarBuilder.WriteAsync(calendar, outputFolder, overwrite, cancellationToken);
             var groups = calendarBuilder.BuildGroups(calendar);
+            builtCalendar = calendar;
+            builtGroups = groups;
             Console.WriteLine($"  Matches: {calendar.Matches.Count}");
             Console.WriteLine($"  Groups: {groups.Groups.Count}");
             Console.WriteLine($"  Output: {Path.Combine(outputFolder, "calendar")}");
@@ -155,6 +166,21 @@ internal static class CliApplication
             Console.WriteLine($"  Output: {Path.Combine(outputFolder, "team-ratings")}");
         }
 
+
+        if (!skipGameOdds && !string.IsNullOrWhiteSpace(gameOddsFile))
+        {
+            Console.WriteLine("Building game-odds model set...");
+            var oddsImporter = new GameOddsImporter();
+            var calendarForOdds = builtCalendar ?? await TryReadModelAsync<Wc2026CalendarSet>(Path.Combine(outputFolder, "calendar", "wc2026-calendar.json"), cancellationToken);
+            var groupsForOdds = builtGroups ?? await TryReadModelAsync<Wc2026GroupSet>(Path.Combine(outputFolder, "calendar", "wc2026-groups.json"), cancellationToken);
+            var odds = oddsImporter.Import(gameOddsFile, calendarForOdds, groupsForOdds);
+            await oddsImporter.WriteAsync(odds, outputFolder, overwrite, cancellationToken);
+            Console.WriteLine($"  Rows read: {odds.RowCount}");
+            Console.WriteLine($"  Odds matches: {odds.Matches.Count}");
+            Console.WriteLine($"  Matched to calendar: {odds.Matches.Count(x => x.CalendarEventId is not null)}");
+            Console.WriteLine($"  Output: {Path.Combine(outputFolder, "odds")}");
+        }
+
         if (options.GetBool("validate", true))
         {
             Console.WriteLine();
@@ -163,6 +189,47 @@ internal static class CliApplication
             PrintValidationSummary(report);
             return report.Errors.Count == 0 ? 0 : 1;
         }
+
+        return 0;
+    }
+
+
+    private static async Task<T?> TryReadModelAsync<T>(string path, CancellationToken cancellationToken)
+    {
+        if (!File.Exists(path))
+            return default;
+
+        var json = await File.ReadAllTextAsync(path, cancellationToken);
+        return System.Text.Json.JsonSerializer.Deserialize<T>(json, new System.Text.Json.JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        });
+    }
+
+
+    private static async Task<int> RunSimulationAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "simulation-folder"], Path.Combine(modelsFolder, "simulation"));
+        var iterations = options.GetInt("iterations", 10000);
+        var seed = options.GetInt("seed", 2026);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Running WC2026 simulation skeleton...");
+        var runner = new Wc2026SimulationRunner();
+        var result = await runner.RunFromModelsFolderAsync(modelsFolder, iterations, seed, outputFolder, overwrite, cancellationToken);
+
+        Console.WriteLine("WC2026 SIMULATION RESULT");
+        Console.WriteLine($"Iterations: {result.Iterations}");
+        Console.WriteLine($"Seed: {result.Seed}");
+        Console.WriteLine($"Teams: {result.Teams.Count}");
+        Console.WriteLine($"Groups: {result.Groups.Count}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top group-winner probabilities:");
+        foreach (var team in result.Teams.OrderByDescending(x => x.WinGroupProbability).Take(12))
+            Console.WriteLine($"  {team.GroupCode} | {team.Team}: win group {team.WinGroupProbability:P1}, qualify R32 {team.QualifiedToRoundOf32Probability:P1}");
 
         return 0;
     }
@@ -230,15 +297,17 @@ internal static class CliApplication
         Console.WriteLine();
         Console.WriteLine("Commands:");
         Console.WriteLine("  grab-sofascore    Download WC2026 SofaScore calendar JSONs and event JSONs");
-        Console.WriteLine("  build-models      Build file-based model sets from SofaScore JSONs and EAFC26 CSV/ZIP");
+        Console.WriteLine("  build-models      Build file-based model sets from SofaScore JSONs, EAFC26 CSV/ZIP, Elo and odds CSV");
         Console.WriteLine("  validate-models   Run sanity checks on generated model sets");
+        Console.WriteLine("  run-simulation    Run WC2026 group-stage Monte Carlo simulation skeleton");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore --destination-folder C:\\Temp\\wc26\\sofascore --overwrite");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore --rounds 3,6:round-of-32,5:round-of-16");
-        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-models --sofascore-folder C:\Temp\wc26\sofascore --player-ratings-file C:\Temp\wc26\EAFC26-Men.zip --models-folder C:\Temp\wc26\models --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-models --sofascore-folder C:\Temp\wc26\sofascore --player-ratings-file C:\Temp\wc26\EAFC26-Men.zip --game-odds-file C:\Temp\wc26\odds\wc2026-game-odds.csv --models-folder C:\Temp\wc26\models --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- validate-models --models-folder C:\Temp\wc26\models");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- run-simulation --models-folder C:\Temp\wc26\models --iterations 10000 --overwrite");
         Console.WriteLine();
         Console.WriteLine("Options for grab-sofascore:");
         Console.WriteLine("  --destination-folder <path>   Output directory. Alias: --output. Default: data/raw/sofascore");
@@ -258,6 +327,8 @@ internal static class CliApplication
         Console.WriteLine("  --sofascore-folder <path>      Folder with raw SofaScore JSONs. Default: data/raw/sofascore");
         Console.WriteLine("  --player-ratings-file <path>   EAFC26-Men.csv or EAFC26-Men.zip from Kaggle");
         Console.WriteLine("  --models-folder <path>         Output model folder. Alias: --output-folder. Default: data/models");
+        Console.WriteLine("  --game-odds-file <path>        Optional parsed game odds CSV. Alias: --odds-file");
+        Console.WriteLine("  --skip-game-odds              Do not build odds model even when odds file is provided");
         Console.WriteLine("  --overwrite                    Overwrite existing model files");
         Console.WriteLine("  --skip-calendar                Do not build calendar/group model sets");
         Console.WriteLine("  --skip-player-ratings          Do not build player-ratings model set");
@@ -266,6 +337,13 @@ internal static class CliApplication
         Console.WriteLine();
         Console.WriteLine("Options for validate-models:");
         Console.WriteLine("  --models-folder <path>         Model folder. Alias: --input-folder. Default: data/models");
+        Console.WriteLine();
+        Console.WriteLine("Options for run-simulation:");
+        Console.WriteLine("  --models-folder <path>         Folder containing generated model sets. Default: data/models");
+        Console.WriteLine("  --output-folder <path>         Simulation output folder. Default: <models-folder>/simulation");
+        Console.WriteLine("  --iterations <n>               Monte Carlo iterations. Default: 10000");
+        Console.WriteLine("  --seed <n>                     Random seed. Default: 2026");
+        Console.WriteLine("  --overwrite                    Overwrite existing simulation files");
     }
 }
 

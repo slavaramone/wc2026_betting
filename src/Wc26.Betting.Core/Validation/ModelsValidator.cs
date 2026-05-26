@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Wc26.Betting.Core.Models;
+using Wc26.Betting.Core.Odds;
 using Wc26.Betting.Core.Players;
 using Wc26.Betting.Core.TeamRatings;
 
@@ -24,12 +25,16 @@ public sealed class ModelsValidator
         var playerPath = Path.Combine(modelsFolder, "player-ratings", "eafc26-men-player-ratings.json");
         var seedsPath = Path.Combine(modelsFolder, "player-ratings", "eafc26-nation-rating-seeds.json");
         var eloPath = Path.Combine(modelsFolder, "team-ratings", "hardcoded-elo-ratings.json");
+        var oddsPath = Path.Combine(modelsFolder, "odds", "game-odds.json");
+        var simulationPath = Path.Combine(modelsFolder, "simulation", "wc2026-simulation-summary.json");
 
         Wc2026CalendarSet? calendar = null;
         Wc2026GroupSet? groups = null;
         EaFcPlayerRatingSet? ratings = null;
         List<NationRatingSeed>? seeds = null;
         EloRatingSet? elo = null;
+        GameOddsSet? odds = null;
+        Wc2026SimulationResultSet? simulation = null;
 
         if (!File.Exists(calendarPath)) report.Errors.Add($"Missing calendar model: {calendarPath}");
         else calendar = await ReadAsync<Wc2026CalendarSet>(calendarPath, report, cancellationToken);
@@ -46,12 +51,19 @@ public sealed class ModelsValidator
         if (!File.Exists(eloPath)) report.Errors.Add($"Missing hardcoded Elo ratings model: {eloPath}");
         else elo = await ReadAsync<EloRatingSet>(eloPath, report, cancellationToken);
 
+        if (File.Exists(oddsPath)) odds = await ReadAsync<GameOddsSet>(oddsPath, report, cancellationToken);
+        else report.Warnings.Add($"Missing game odds model: {oddsPath}. This is OK only before odds are imported.");
+
+        if (File.Exists(simulationPath)) simulation = await ReadAsync<Wc2026SimulationResultSet>(simulationPath, report, cancellationToken);
+
         if (calendar is not null) ValidateCalendar(calendar, report);
         if (groups is not null) ValidateGroups(groups, calendar, report);
         if (ratings is not null) ValidateRatings(ratings, report);
         if (elo is not null) ValidateEloRatings(elo, report);
+        if (odds is not null) ValidateGameOdds(odds, calendar, groups, report);
         if (calendar is not null && ratings is not null) ValidateCalendarTeamCoverage(calendar, ratings, seeds, report);
         if (calendar is not null && elo is not null) ValidateCalendarEloCoverage(calendar, elo, report);
+        if (simulation is not null) ValidateSimulation(simulation, groups, report);
 
         if (writeReport)
         {
@@ -200,6 +212,124 @@ public sealed class ModelsValidator
     }
 
 
+
+    private static void ValidateGameOdds(GameOddsSet odds, Wc2026CalendarSet? calendar, Wc2026GroupSet? groups, ModelValidationReport report)
+    {
+        report.Info.Add($"Game odds rows read: {odds.RowCount}; odds matches: {odds.Matches.Count}");
+
+        if (odds.Matches.Count == 0)
+        {
+            report.Errors.Add("Game odds model has zero matches.");
+            return;
+        }
+
+        var duplicateKeys = odds.Matches
+            .Where(x => !string.IsNullOrWhiteSpace(x.MatchKey))
+            .GroupBy(x => x.MatchKey, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .Take(20)
+            .ToList();
+        if (duplicateKeys.Count > 0)
+            report.Errors.Add($"Duplicate odds match keys: {string.Join(", ", duplicateKeys)}");
+
+        var invalid1X2 = odds.Matches
+            .Where(x => !IsValidOdds(x.Odds1) || !IsValidOdds(x.OddsX) || !IsValidOdds(x.Odds2))
+            .Select(x => $"{x.HomeTeam}-{x.AwayTeam}")
+            .Take(20)
+            .ToList();
+        if (invalid1X2.Count > 0)
+            report.Errors.Add($"Invalid or missing 1X2 odds for matches: {string.Join(", ", invalid1X2)}");
+
+        var invalidTotals = odds.Matches
+            .Where(x => x.TotalLine is not null && (!IsValidOdds(x.OverOdds) || !IsValidOdds(x.UnderOdds)))
+            .Select(x => $"{x.HomeTeam}-{x.AwayTeam}")
+            .Take(20)
+            .ToList();
+        if (invalidTotals.Count > 0)
+            report.Warnings.Add($"Total line exists but over/under odds are invalid or missing: {string.Join(", ", invalidTotals)}");
+
+        var mapped = odds.Matches.Count(x => x.CalendarEventId is not null);
+        report.Info.Add($"Game odds mapped to calendar: {mapped}/{odds.Matches.Count}");
+        if (mapped != odds.Matches.Count)
+        {
+            var examples = odds.Matches
+                .Where(x => x.CalendarEventId is null)
+                .Select(x => $"{x.MatchDate} {x.HomeTeam}-{x.AwayTeam}")
+                .Take(20)
+                .ToList();
+            report.Warnings.Add($"Game odds not matched to calendar: {odds.Matches.Count - mapped}. Examples: {string.Join(", ", examples)}");
+        }
+
+        var duplicateEventIds = odds.Matches
+            .Where(x => x.CalendarEventId is not null)
+            .GroupBy(x => x.CalendarEventId)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key!.Value)
+            .Take(20)
+            .ToList();
+        if (duplicateEventIds.Count > 0)
+            report.Errors.Add($"Multiple odds rows mapped to same calendar event ids: {string.Join(", ", duplicateEventIds)}");
+
+        var badOverrounds = odds.Matches
+            .Where(x => x.Odds1X2Overround is < 1.0 or > 1.35)
+            .Select(x => $"{x.HomeTeam}-{x.AwayTeam}={x.Odds1X2Overround:0.###}")
+            .Take(20)
+            .ToList();
+        if (badOverrounds.Count > 0)
+            report.Warnings.Add($"Suspicious 1X2 overrounds outside 1.00..1.35: {string.Join(", ", badOverrounds)}");
+
+        var totalBadOverrounds = odds.Matches
+            .Where(x => x.TotalOverround is < 1.0 or > 1.25)
+            .Select(x => $"{x.HomeTeam}-{x.AwayTeam}={x.TotalOverround:0.###}")
+            .Take(20)
+            .ToList();
+        if (totalBadOverrounds.Count > 0)
+            report.Warnings.Add($"Suspicious total overrounds outside 1.00..1.25: {string.Join(", ", totalBadOverrounds)}");
+
+        var rawRussianNotMapped = odds.Matches
+            .SelectMany(x => new[] { (Raw: x.HomeTeamRaw, English: x.HomeTeam), (Raw: x.AwayTeamRaw, English: x.AwayTeam) })
+            .Where(x => ContainsCyrillic(x.English))
+            .Select(x => x.Raw)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(40)
+            .ToList();
+        if (rawRussianNotMapped.Count > 0)
+            report.Errors.Add($"Russian team names not mapped to English in odds model: {string.Join(", ", rawRussianNotMapped)}");
+
+        if (calendar is not null)
+        {
+            var groupEventIds = calendar.Matches
+                .Where(x => x.Stage == "group_stage" && x.HasKnownTeams)
+                .Select(x => x.EventId)
+                .ToHashSet();
+            var oddsGroupEventIds = odds.Matches
+                .Where(x => x.CalendarEventId is not null && groupEventIds.Contains(x.CalendarEventId.Value))
+                .Select(x => x.CalendarEventId!.Value)
+                .ToHashSet();
+
+            report.Info.Add($"Group-stage calendar matches with odds: {oddsGroupEventIds.Count}/{groupEventIds.Count}");
+            if (groupEventIds.Count == 72 && oddsGroupEventIds.Count != 72)
+                report.Warnings.Add($"Expected odds for 72 group-stage matches; mapped odds cover {oddsGroupEventIds.Count}.");
+        }
+
+        if (groups is not null)
+        {
+            var byGroup = odds.Matches
+                .Where(x => !string.IsNullOrWhiteSpace(x.CalendarGroupCode))
+                .GroupBy(x => x.CalendarGroupCode, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(g => $"{g.Key}={g.Count()}");
+            report.Info.Add($"Game odds by group: {string.Join(", ", byGroup)}");
+        }
+    }
+
+    private static bool IsValidOdds(double? value)
+        => value is > 1.0 and < 1000.0;
+
+    private static bool ContainsCyrillic(string value)
+        => value.Any(c => c >= '\u0400' && c <= '\u04FF');
+
     private static void ValidateEloRatings(EloRatingSet elo, ModelValidationReport report)
     {
         report.Info.Add($"Hardcoded Elo teams: {elo.Teams.Count}; as of {elo.AsOfDate:yyyy-MM-dd}");
@@ -318,6 +448,73 @@ public sealed class ModelsValidator
         if (missing.Count > 0)
             report.Warnings.Add($"Calendar teams not found in hardcoded Elo ratings after built-in normalization: {string.Join(", ", missing.Take(40))}.");
     }
+
+    private static void ValidateSimulation(Wc2026SimulationResultSet simulation, Wc2026GroupSet? groups, ModelValidationReport report)
+    {
+        report.Info.Add($"Simulation skeleton: iterations={simulation.Iterations}; teams={simulation.Teams.Count}; groups={simulation.Groups.Count}");
+
+        if (simulation.Iterations <= 0)
+            report.Errors.Add("Simulation iterations must be greater than zero.");
+        if (simulation.Teams.Count != 48)
+            report.Warnings.Add($"Simulation has {simulation.Teams.Count} teams, expected 48.");
+        if (simulation.Groups.Count != 12)
+            report.Warnings.Add($"Simulation has {simulation.Groups.Count} groups, expected 12.");
+
+        var duplicateTeams = simulation.Teams
+            .GroupBy(x => x.Team, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .Take(20)
+            .ToList();
+        if (duplicateTeams.Count > 0)
+            report.Errors.Add($"Simulation duplicate teams: {string.Join(", ", duplicateTeams)}");
+
+        var badProbabilities = simulation.Teams
+            .Where(x => !IsProbability(x.WinGroupProbability)
+                || !IsProbability(x.TopTwoProbability)
+                || !IsProbability(x.ThirdPlaceProbability)
+                || !IsProbability(x.ThirdPlaceQualifiedProbability)
+                || !IsProbability(x.QualifiedToRoundOf32Probability)
+                || !IsProbability(x.EliminatedInGroupProbability))
+            .Select(x => x.Team)
+            .Take(20)
+            .ToList();
+        if (badProbabilities.Count > 0)
+            report.Errors.Add($"Simulation probabilities outside 0..1: {string.Join(", ", badProbabilities)}");
+
+        var qualifiedSum = simulation.Teams.Sum(x => x.QualifiedToRoundOf32Probability);
+        if (Math.Abs(qualifiedSum - 32.0) > 0.25)
+            report.Warnings.Add($"Simulation qualified-to-R32 probability sum is {qualifiedSum:0.###}, expected about 32.");
+
+        var thirdQualifiedSum = simulation.Teams.Sum(x => x.ThirdPlaceQualifiedProbability);
+        if (Math.Abs(thirdQualifiedSum - 8.0) > 0.25)
+            report.Warnings.Add($"Simulation third-place qualified probability sum is {thirdQualifiedSum:0.###}, expected about 8.");
+
+        foreach (var group in simulation.Groups)
+        {
+            var winGroupSum = group.TeamProbabilities.Sum(x => x.Rank1Probability);
+            var rank2Sum = group.TeamProbabilities.Sum(x => x.Rank2Probability);
+            var rank3Sum = group.TeamProbabilities.Sum(x => x.Rank3Probability);
+            var rank4Sum = group.TeamProbabilities.Sum(x => x.Rank4Probability);
+            if (Math.Abs(winGroupSum - 1.0) > 0.05
+                || Math.Abs(rank2Sum - 1.0) > 0.05
+                || Math.Abs(rank3Sum - 1.0) > 0.05
+                || Math.Abs(rank4Sum - 1.0) > 0.05)
+                report.Warnings.Add($"Simulation group {group.GroupCode} rank probability sums are suspicious: r1={winGroupSum:0.###}, r2={rank2Sum:0.###}, r3={rank3Sum:0.###}, r4={rank4Sum:0.###}.");
+        }
+
+        if (groups is not null)
+        {
+            var groupTeams = groups.Groups.SelectMany(g => g.Teams.Select(t => t.TeamName)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var simTeams = simulation.Teams.Select(x => x.Team).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var missing = groupTeams.Except(simTeams).Take(20).ToList();
+            if (missing.Count > 0)
+                report.Errors.Add($"Simulation missing group teams: {string.Join(", ", missing)}");
+        }
+    }
+
+    private static bool IsProbability(double value) => value >= -0.000001 && value <= 1.000001 && !double.IsNaN(value) && !double.IsInfinity(value);
+
 
     private static string NormalizeNation(string value)
     {
