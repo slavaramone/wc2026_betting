@@ -326,10 +326,18 @@ public sealed class Wc2026SimulationRunner
         var v = value.Trim();
         return v switch
         {
+            // Normalize calendar/SofaScore names to EAFC26 nation names.
+            // Kept in code by design; no external alias file is used.
             "Bosnia & Herzegovina" => "Bosnia and Herzegovina",
             "Cabo Verde" => "Cape Verde Islands",
             "DR Congo" => "Congo DR",
             "Netherlands" => "Holland",
+            "Czechia" => "Czech Republic",
+            "South Korea" => "Korea Republic",
+            "Korea, Republic of" => "Korea Republic",
+            "USA" => "United States",
+            "United States of America" => "United States",
+            "Türkiye" => "Turkey",
             _ => v
         };
     }
