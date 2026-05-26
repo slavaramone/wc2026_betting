@@ -460,6 +460,10 @@ public sealed class ModelsValidator
         if (simulation.Groups.Count != 12)
             report.Warnings.Add($"Simulation has {simulation.Groups.Count} groups, expected 12.");
 
+        report.Info.Add($"Simulation pair comparisons: {simulation.PairComparisons.Count}");
+        if (simulation.PairComparisons.Count > 0 && simulation.PairComparisons.Count != 72)
+            report.Warnings.Add($"Simulation has {simulation.PairComparisons.Count} pair comparisons, expected 72 for 12 groups of 4 teams.");
+
         var duplicateTeams = simulation.Teams
             .GroupBy(x => x.Team, StringComparer.OrdinalIgnoreCase)
             .Where(g => g.Count() > 1)

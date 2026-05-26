@@ -53,6 +53,7 @@ public sealed class Wc2026SimulationRunner
             .ToList();
 
         var accum = allTeams.ToDictionary(x => x.Team, x => new TeamAccum(x.Team, x.GroupCode), StringComparer.OrdinalIgnoreCase);
+        var pairHigherCounts = new Dictionary<(string Higher, string Lower), int>(StringTupleComparer.OrdinalIgnoreCase);
         var oddsByEventId = odds.Matches
             .Where(x => x.CalendarEventId is not null)
             .GroupBy(x => x.CalendarEventId!.Value)
@@ -97,6 +98,15 @@ public sealed class Wc2026SimulationRunner
                     {
                         team.ThirdPlace++;
                         thirdPlaced.Add(row);
+                    }
+                }
+
+                for (var higherIndex = 0; higherIndex < ranked.Count; higherIndex++)
+                {
+                    for (var lowerIndex = higherIndex + 1; lowerIndex < ranked.Count; lowerIndex++)
+                    {
+                        var key = (Higher: ranked[higherIndex].Team, Lower: ranked[lowerIndex].Team);
+                        pairHigherCounts[key] = pairHigherCounts.GetValueOrDefault(key) + 1;
                     }
                 }
             }
@@ -163,6 +173,34 @@ public sealed class Wc2026SimulationRunner
             })
             .ToList();
 
+        var pairSummaries = groups.Groups
+            .OrderBy(x => x.GroupCode, StringComparer.OrdinalIgnoreCase)
+            .SelectMany(group =>
+            {
+                var teams = group.Teams.Select(t => t.TeamName).OrderBy(t => t, StringComparer.OrdinalIgnoreCase).ToList();
+                var pairs = new List<Wc2026SimulationPairComparisonSummary>();
+                for (var i = 0; i < teams.Count; i++)
+                {
+                    for (var j = i + 1; j < teams.Count; j++)
+                    {
+                        var team1 = teams[i];
+                        var team2 = teams[j];
+                        var team1Higher = pairHigherCounts.GetValueOrDefault((team1, team2));
+                        var team2Higher = pairHigherCounts.GetValueOrDefault((team2, team1));
+                        pairs.Add(new Wc2026SimulationPairComparisonSummary
+                        {
+                            GroupCode = group.GroupCode,
+                            Team1 = team1,
+                            Team2 = team2,
+                            Team1FinishHigherProbability = RoundProbability(team1Higher, iterations),
+                            Team2FinishHigherProbability = RoundProbability(team2Higher, iterations)
+                        });
+                    }
+                }
+                return pairs;
+            })
+            .ToList();
+
         return new Wc2026SimulationResultSet
         {
             ModelsFolder = modelsFolder,
@@ -170,7 +208,8 @@ public sealed class Wc2026SimulationRunner
             Seed = seed,
             Notes = "Skeleton only: simulates group stage from 1X2 odds; ranks groups with FIFA-style MVP tiebreakers; selects 8 best third-place teams. Knockout bracket is not simulated yet.",
             Teams = teamSummaries,
-            Groups = groupSummaries
+            Groups = groupSummaries,
+            PairComparisons = pairSummaries
         };
     }
 
@@ -357,6 +396,7 @@ public sealed class Wc2026SimulationRunner
         await WriteJsonAsync(Path.Combine(outputFolder, "wc2026-simulation-summary.json"), result, overwrite, cancellationToken);
         await WriteTeamCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-team-probabilities.csv"), result, overwrite, cancellationToken);
         await WriteGroupCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-group-probabilities.csv"), result, overwrite, cancellationToken);
+        await WritePairComparisonCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-pair-comparisons.csv"), result, overwrite, cancellationToken);
     }
 
     private static async Task WriteJsonAsync<T>(string path, T value, bool overwrite, CancellationToken cancellationToken)
@@ -407,8 +447,40 @@ public sealed class Wc2026SimulationRunner
         }
     }
 
+
+    private static async Task WritePairComparisonCsvAsync(string path, Wc2026SimulationResultSet result, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"File already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("group_code,team1,team2,team1_finish_higher_probability,team2_finish_higher_probability");
+        foreach (var pair in result.PairComparisons)
+        {
+            var values = new[]
+            {
+                pair.GroupCode, pair.Team1, pair.Team2,
+                pair.Team1FinishHigherProbability.ToString("0.######"),
+                pair.Team2FinishHigherProbability.ToString("0.######")
+            };
+            await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+        }
+    }
+
     private static double Round(double value) => Math.Round(value, 6);
     private static double RoundProbability(int count, int iterations) => Round(count / (double)iterations);
+
+    private sealed class StringTupleComparer : IEqualityComparer<(string First, string Second)>
+    {
+        public static readonly StringTupleComparer OrdinalIgnoreCase = new();
+
+        public bool Equals((string First, string Second) x, (string First, string Second) y)
+            => string.Equals(x.First, y.First, StringComparison.OrdinalIgnoreCase)
+               && string.Equals(x.Second, y.Second, StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode((string First, string Second) obj)
+            => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(obj.First), StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Second));
+    }
 
     private sealed record TeamRef(string GroupCode, string Team);
     private sealed record OutcomeProbabilities(double HomeWin, double Draw, double AwayWin);

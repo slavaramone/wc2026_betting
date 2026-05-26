@@ -1,4 +1,5 @@
 using Wc26.Betting.Core.Calendar;
+using Wc26.Betting.Core.Markets;
 using Wc26.Betting.Core.Models;
 using Wc26.Betting.Core.Odds;
 using Wc26.Betting.Core.Players;
@@ -44,6 +45,7 @@ internal static class CliApplication
                 "build-models" => await RunBuildModelsAsync(options, cancellationToken),
                 "validate-models" => await RunValidateModelsAsync(options, cancellationToken),
                 "run-simulation" => await RunSimulationAsync(options, cancellationToken),
+                "compare-group-markets" => await RunCompareGroupMarketsAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
         }
@@ -234,6 +236,47 @@ internal static class CliApplication
         return 0;
     }
 
+
+    private static async Task<int> RunCompareGroupMarketsAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports"));
+        var groupResultsOddsFile = options.GetAny(["group-results-odds-file", "group-stage-results-odds-file"], string.Empty);
+        var finishHigherOddsFile = options.GetAny(["finish-higher-odds-file", "who-is-higher-odds-file"], string.Empty);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Comparing group market odds against simulation probabilities...");
+        var comparer = new GroupMarketOddsComparer();
+        var result = await comparer.CompareFromFilesAsync(
+            modelsFolder,
+            string.IsNullOrWhiteSpace(groupResultsOddsFile) ? null : groupResultsOddsFile,
+            string.IsNullOrWhiteSpace(finishHigherOddsFile) ? null : finishHigherOddsFile,
+            outputFolder,
+            minEdge,
+            overwrite,
+            cancellationToken);
+
+        Console.WriteLine("GROUP MARKET COMPARISON RESULT");
+        Console.WriteLine($"Rows: {result.Summary.Rows}");
+        Console.WriteLine($"Valid rows: {result.Summary.ValidRows}");
+        Console.WriteLine($"Invalid rows: {result.Summary.InvalidRows}");
+        Console.WriteLine($"BET rows: {result.Summary.BetRows}");
+        Console.WriteLine($"LEAN rows: {result.Summary.LeanRows}");
+        Console.WriteLine($"NO_BET rows: {result.Summary.NoBetRows}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top edges:");
+        foreach (var edge in result.Summary.TopEdges.Take(15))
+        {
+            var opponent = string.IsNullOrWhiteSpace(edge.Opponent) ? string.Empty : $" vs {edge.Opponent}";
+            Console.WriteLine($"  {edge.MarketGroupCode}/{edge.SimulationGroupCode} | {edge.Market} | {edge.Selection}{opponent} | {edge.Side} @ {edge.BookOdds:0.###} | sim {edge.SimulationProbability:P1} | book {edge.BookProbabilityUsed:P1} | edge {edge.EdgeProbability:P1}");
+        }
+
+        return 0;
+    }
+
     private static async Task<int> RunValidateModelsAsync(CliOptions options, CancellationToken cancellationToken)
     {
         var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
@@ -300,6 +343,7 @@ internal static class CliApplication
         Console.WriteLine("  build-models      Build file-based model sets from SofaScore JSONs, EAFC26 CSV/ZIP, Elo and odds CSV");
         Console.WriteLine("  validate-models   Run sanity checks on generated model sets");
         Console.WriteLine("  run-simulation    Run WC2026 group-stage Monte Carlo simulation skeleton");
+        Console.WriteLine("  compare-group-markets  Compare group/final-position market odds against simulation");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore");
@@ -308,6 +352,7 @@ internal static class CliApplication
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-models --sofascore-folder C:\Temp\wc26\sofascore --player-ratings-file C:\Temp\wc26\EAFC26-Men.zip --game-odds-file C:\Temp\wc26\odds\wc2026-game-odds.csv --models-folder C:\Temp\wc26\models --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- validate-models --models-folder C:\Temp\wc26\models");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- run-simulation --models-folder C:\Temp\wc26\models --iterations 10000 --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- compare-group-markets --models-folder C:\Temp\wc26\models --group-results-odds-file data\raw\odds\wc2026_group_stage_results_market_odds_2026-05-26.csv --finish-higher-odds-file data\raw\odds\wc2026_finish_higher_market_odds_2026-05-26.csv --overwrite");
         Console.WriteLine();
         Console.WriteLine("Options for grab-sofascore:");
         Console.WriteLine("  --destination-folder <path>   Output directory. Alias: --output. Default: data/raw/sofascore");
@@ -334,6 +379,14 @@ internal static class CliApplication
         Console.WriteLine("  --skip-player-ratings          Do not build player-ratings model set");
         Console.WriteLine("  --skip-elo-ratings             Do not build hardcoded Elo ratings model set");
         Console.WriteLine("  --validate <true|false>        Run validation after build. Default: true");
+        Console.WriteLine();
+        Console.WriteLine("Options for compare-group-markets:");
+        Console.WriteLine("  --models-folder <path>              Folder containing generated model sets and simulation output. Default: data/models");
+        Console.WriteLine("  --group-results-odds-file <path>    Parsed group-stage results market CSV");
+        Console.WriteLine("  --finish-higher-odds-file <path>    Parsed finish-higher market CSV");
+        Console.WriteLine("  --output-folder <path>              Report output folder. Default: <models-folder>/reports");
+        Console.WriteLine("  --min-edge <probability>            BET threshold as probability edge. Default: 0.03");
+        Console.WriteLine("  --overwrite                         Overwrite existing comparison files");
         Console.WriteLine();
         Console.WriteLine("Options for validate-models:");
         Console.WriteLine("  --models-folder <path>         Model folder. Alias: --input-folder. Default: data/models");
@@ -395,6 +448,17 @@ internal sealed class CliOptions
         }
 
         return defaultValue;
+    }
+
+    public double GetDouble(string name, double defaultValue)
+    {
+        if (!_values.TryGetValue(name, out var value))
+            return defaultValue;
+
+        value = value.Replace(',', '.');
+        return double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : throw new ArgumentException($"Option '--{name}' requires numeric value.");
     }
 
     public int GetInt(string name, int defaultValue)
