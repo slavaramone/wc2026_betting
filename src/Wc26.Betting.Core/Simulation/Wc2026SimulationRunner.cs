@@ -444,13 +444,31 @@ public sealed class Wc2026SimulationRunner
 
     private static KnockoutSlotSpec ParseKnockoutSlot(string raw)
     {
-        var value = (raw ?? string.Empty).Trim().ToUpperInvariant().Replace(" ", string.Empty);
+        var value = NormalizeSlotText(raw);
         if (string.IsNullOrWhiteSpace(value))
             return new KnockoutSlotSpec(raw, null, []);
 
         var rank = TryParseRank(value);
         var groups = ExtractGroupCodes(value);
-        return new KnockoutSlotSpec(raw, rank, groups);
+        var canonical = CanonicalizeSlot(raw, rank, groups);
+        return new KnockoutSlotSpec(canonical, rank, groups);
+    }
+
+    private static string NormalizeSlotText(string raw)
+        => (raw ?? string.Empty)
+            .Trim()
+            .ToUpperInvariant()
+            .Replace(" ", string.Empty);
+
+    private static string CanonicalizeSlot(string raw, int? rank, IReadOnlyList<string> groups)
+    {
+        if (rank is null || groups.Count == 0)
+            return raw;
+
+        // SofaScore placeholders are inconsistent: most slots are 1G / 2H,
+        // but some are returned as G1 / H2. Internally and in reports we use
+        // the canonical FIFA-like format rank + group, e.g. 1G, 2H, 3A/3B.
+        return string.Join("/", groups.Select(group => $"{rank.Value}{group}"));
     }
 
     private static int? TryParseRank(string value)
