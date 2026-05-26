@@ -10,6 +10,11 @@ public sealed class Wc2026SimulationRunner
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true, WriteIndented = true };
 
+    private const double MarketProbabilityWeight = 0.85;
+    private const double EloProbabilityWeight = 0.12;
+    private const double EaProbabilityWeight = 0.03;
+
+
     public async Task<Wc2026SimulationResultSet> RunFromModelsFolderAsync(
         string modelsFolder,
         int iterations,
@@ -76,7 +81,7 @@ public sealed class Wc2026SimulationRunner
 
                 foreach (var match in group.Matches.OrderBy(x => x.StartUtc ?? DateTimeOffset.MaxValue).ThenBy(x => x.EventId))
                 {
-                    var result = SimulateMatch(match, oddsByEventId.GetValueOrDefault(match.EventId), eloByTeam, rng);
+                    var result = SimulateMatch(match, oddsByEventId.GetValueOrDefault(match.EventId), eloByTeam, seedByTeam, rng);
                     ApplyResult(table[result.HomeTeam], table[result.AwayTeam], result.HomeGoals, result.AwayGoals);
                     playedMatches.Add(result);
                 }
@@ -206,7 +211,7 @@ public sealed class Wc2026SimulationRunner
             ModelsFolder = modelsFolder,
             Iterations = iterations,
             Seed = seed,
-            Notes = "Skeleton only: simulates group stage from 1X2 odds; ranks groups with FIFA-style MVP tiebreakers; selects 8 best third-place teams. Knockout bracket is not simulated yet.",
+            Notes = "Group-stage simulation uses blended match probabilities: 85% normalized market 1X2, 12% Elo, 3% EA nation strength. Ranks groups with FIFA-style MVP tiebreakers and selects 8 best third-place teams. Knockout bracket is not simulated yet.",
             Teams = teamSummaries,
             Groups = groupSummaries,
             PairComparisons = pairSummaries
@@ -217,11 +222,10 @@ public sealed class Wc2026SimulationRunner
         Wc2026GroupMatch match,
         GameOddsMatch? odds,
         IReadOnlyDictionary<string, EloTeamRating> eloByTeam,
+        IReadOnlyDictionary<string, NationRatingSeed> seedByTeam,
         Random rng)
     {
-        var probabilities = odds is not null && odds.Odds1 is > 1.0 && odds.OddsX is > 1.0 && odds.Odds2 is > 1.0
-            ? ProbabilitiesFromOdds(odds.Odds1.Value, odds.OddsX.Value, odds.Odds2.Value)
-            : ProbabilitiesFromElo(match.HomeTeam, match.AwayTeam, eloByTeam);
+        var probabilities = BlendedMatchProbabilities(match.HomeTeam, match.AwayTeam, odds, eloByTeam, seedByTeam);
 
         var roll = rng.NextDouble();
         if (roll < probabilities.HomeWin)
@@ -242,6 +246,31 @@ public sealed class Wc2026SimulationRunner
         return new SimulatedMatchResult(match.EventId, match.HomeTeam, match.AwayTeam, home, home + awayMargin);
     }
 
+    private static OutcomeProbabilities BlendedMatchProbabilities(
+        string homeTeam,
+        string awayTeam,
+        GameOddsMatch? odds,
+        IReadOnlyDictionary<string, EloTeamRating> eloByTeam,
+        IReadOnlyDictionary<string, NationRatingSeed> seedByTeam)
+    {
+        var weighted = new List<(OutcomeProbabilities Probabilities, double Weight)>();
+
+        if (odds is not null && odds.Odds1 is > 1.0 && odds.OddsX is > 1.0 && odds.Odds2 is > 1.0)
+            weighted.Add((ProbabilitiesFromOdds(odds.Odds1.Value, odds.OddsX.Value, odds.Odds2.Value), MarketProbabilityWeight));
+
+        weighted.Add((ProbabilitiesFromElo(homeTeam, awayTeam, eloByTeam), EloProbabilityWeight));
+        weighted.Add((ProbabilitiesFromEa(homeTeam, awayTeam, seedByTeam), EaProbabilityWeight));
+
+        var totalWeight = weighted.Sum(x => x.Weight);
+        if (totalWeight <= 0)
+            return new OutcomeProbabilities(0.365, 0.27, 0.365);
+
+        var home = weighted.Sum(x => x.Probabilities.HomeWin * x.Weight) / totalWeight;
+        var draw = weighted.Sum(x => x.Probabilities.Draw * x.Weight) / totalWeight;
+        var away = weighted.Sum(x => x.Probabilities.AwayWin * x.Weight) / totalWeight;
+        return NormalizeProbabilities(new OutcomeProbabilities(home, draw, away));
+    }
+
     private static OutcomeProbabilities ProbabilitiesFromOdds(double home, double draw, double away)
     {
         var ih = 1.0 / home;
@@ -255,9 +284,46 @@ public sealed class Wc2026SimulationRunner
     {
         var home = eloByTeam.GetValueOrDefault(HardcodedEloRatingsBuilder.NormalizeToEloName(homeTeam))?.Rating ?? 1500;
         var away = eloByTeam.GetValueOrDefault(HardcodedEloRatingsBuilder.NormalizeToEloName(awayTeam))?.Rating ?? 1500;
-        var homeNoDraw = 1.0 / (1.0 + Math.Pow(10.0, -(home - away) / 400.0));
-        const double draw = 0.27;
-        return new OutcomeProbabilities(homeNoDraw * (1.0 - draw), draw, (1.0 - homeNoDraw) * (1.0 - draw));
+        return ProbabilitiesFromRatingDifference(home - away, 0.27);
+    }
+
+    private static OutcomeProbabilities ProbabilitiesFromEa(string homeTeam, string awayTeam, IReadOnlyDictionary<string, NationRatingSeed> seedByTeam)
+    {
+        var home = EaStrength(seedByTeam.GetValueOrDefault(NormalizeEaNation(homeTeam)));
+        var away = EaStrength(seedByTeam.GetValueOrDefault(NormalizeEaNation(awayTeam)));
+
+        // EA overall points are much tighter than Elo points. Treat one EA overall point
+        // as roughly 25 Elo points so EA can slightly pull match probabilities without
+        // overpowering market prices. Missing teams are neutralized at 75.0.
+        var eaRatingDiffAsElo = (home - away) * 25.0;
+        return ProbabilitiesFromRatingDifference(eaRatingDiffAsElo, 0.27);
+    }
+
+    private static double EaStrength(NationRatingSeed? seed)
+    {
+        if (seed is null || seed.Top11AverageOverall <= 0)
+            return 75.0;
+
+        // Top11 is the main first-XI signal. Top26 adds a small squad-depth component.
+        var top26 = seed.Top26AverageOverall > 0 ? seed.Top26AverageOverall : seed.Top11AverageOverall;
+        return (0.75 * seed.Top11AverageOverall) + (0.25 * top26);
+    }
+
+    private static OutcomeProbabilities ProbabilitiesFromRatingDifference(double ratingDiff, double draw)
+    {
+        var homeNoDraw = 1.0 / (1.0 + Math.Pow(10.0, -ratingDiff / 400.0));
+        return NormalizeProbabilities(new OutcomeProbabilities(homeNoDraw * (1.0 - draw), draw, (1.0 - homeNoDraw) * (1.0 - draw)));
+    }
+
+    private static OutcomeProbabilities NormalizeProbabilities(OutcomeProbabilities probabilities)
+    {
+        var home = Math.Max(0.0, probabilities.HomeWin);
+        var draw = Math.Max(0.0, probabilities.Draw);
+        var away = Math.Max(0.0, probabilities.AwayWin);
+        var sum = home + draw + away;
+        return sum <= 0
+            ? new OutcomeProbabilities(0.365, 0.27, 0.365)
+            : new OutcomeProbabilities(home / sum, draw / sum, away / sum);
     }
 
     private static void ApplyResult(GroupStandingRow home, GroupStandingRow away, int homeGoals, int awayGoals)
