@@ -94,6 +94,7 @@ public sealed class Wc2026SimulationRunner
 
         var accum = allTeams.ToDictionary(x => x.Team, x => new TeamAccum(x.Team, x.GroupCode), StringComparer.OrdinalIgnoreCase);
         var knockoutRules = BuildKnockoutBracketRules(calendar, groups);
+        var thirdPlaceAllocationTable = OfficialThirdPlaceAllocationTable.CreateDefault();
         var pairHigherCounts = new Dictionary<(string Higher, string Lower), int>(StringTupleComparer.OrdinalIgnoreCase);
         var oddsByEventId = odds.Matches
             .Where(x => x.CalendarEventId is not null)
@@ -158,7 +159,7 @@ public sealed class Wc2026SimulationRunner
             foreach (var row in qualifiedThirds)
                 accum[row.Team].ThirdPlaceQualified++;
 
-            SimulateKnockout(rankedByGroup, qualifiedThirds, knockoutRules, accum, eloByTeam, seedByTeam, activeWeights, rng);
+            SimulateKnockout(rankedByGroup, qualifiedThirds, knockoutRules, thirdPlaceAllocationTable, accum, eloByTeam, seedByTeam, activeWeights, rng);
         }
 
         var teamSummaries = allTeams.Select(x =>
@@ -271,7 +272,7 @@ public sealed class Wc2026SimulationRunner
                 Slot1Groups = string.Join("|", r.Slot1.Groups),
                 Slot2Groups = string.Join("|", r.Slot2.Groups)
             }).ToList(),
-            Notes = $"Group-stage simulation uses blended match probabilities: {activeWeights.Market:P0} normalized market 1X2, {activeWeights.Elo:P0} Elo, {activeWeights.Ea:P0} EA nation strength. Ranks groups with FIFA-style MVP tiebreakers and selects 8 best third-place teams. Knockout skeleton maps R32 slots via {knockoutRules.Source}; later knockout rounds are paired sequentially.",
+            Notes = $"Group-stage simulation uses blended match probabilities: {activeWeights.Market:P0} normalized market 1X2, {activeWeights.Elo:P0} Elo, {activeWeights.Ea:P0} EA nation strength. Ranks groups with FIFA-style MVP tiebreakers and selects 8 best third-place teams. Knockout bracket uses hardcoded official R32 slot order, fixed later-round pairing, and a third-place allocation table for the 1A/1B/1D/1E/1G/1I/1K/1L slots. Third-place allocation table source: {thirdPlaceAllocationTable.Source}; rows: {thirdPlaceAllocationTable.RowCount}.",
             Teams = teamSummaries,
             Groups = groupSummaries,
             PairComparisons = pairSummaries
@@ -283,19 +284,20 @@ public sealed class Wc2026SimulationRunner
         IReadOnlyDictionary<string, List<GroupStandingRow>> rankedByGroup,
         IReadOnlyList<GroupStandingRow> qualifiedThirds,
         KnockoutBracketPlan bracket,
+        OfficialThirdPlaceAllocationTable thirdPlaceAllocationTable,
         IReadOnlyDictionary<string, TeamAccum> accum,
         IReadOnlyDictionary<string, EloTeamRating> eloByTeam,
         IReadOnlyDictionary<string, NationRatingSeed> seedByTeam,
         Wc2026SimulationWeights weights,
         Random rng)
     {
-        var usedThirdGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var thirdPlaceAllocation = thirdPlaceAllocationTable.Resolve(qualifiedThirds.Select(x => x.GroupCode));
         var roundOf32Teams = new List<(string Team1, string Team2)>();
 
         foreach (var rule in bracket.Rules.OrderBy(x => x.MatchNumber))
         {
-            var team1 = ResolveBracketSlot(rule.Slot1, rankedByGroup, qualifiedThirds, usedThirdGroups);
-            var team2 = ResolveBracketSlot(rule.Slot2, rankedByGroup, qualifiedThirds, usedThirdGroups);
+            var team1 = ResolveBracketSlot(rule.Slot1, rankedByGroup, qualifiedThirds, thirdPlaceAllocation);
+            var team2 = ResolveBracketSlot(rule.Slot2, rankedByGroup, qualifiedThirds, thirdPlaceAllocation);
             if (!string.IsNullOrWhiteSpace(team1) && !string.IsNullOrWhiteSpace(team2) && !string.Equals(team1, team2, StringComparison.OrdinalIgnoreCase))
                 roundOf32Teams.Add((team1, team2));
         }
@@ -304,7 +306,7 @@ public sealed class Wc2026SimulationRunner
         var quarterFinal = SimulateKnockoutRound(PairSequentially(roundOf16), accum, a => a.ReachQuarterFinal++, eloByTeam, seedByTeam, weights, rng);
         var semiFinal = SimulateKnockoutRound(PairSequentially(quarterFinal), accum, a => a.ReachSemiFinal++, eloByTeam, seedByTeam, weights, rng);
         var final = SimulateKnockoutRound(PairSequentially(semiFinal), accum, a => a.ReachFinal++, eloByTeam, seedByTeam, weights, rng);
-        var winner = SimulateKnockoutRound(PairSequentially(final), accum, a => a.Winner++, eloByTeam, seedByTeam, weights, rng);
+        _ = SimulateKnockoutRound(PairSequentially(final), accum, a => a.Winner++, eloByTeam, seedByTeam, weights, rng);
     }
 
     private static List<string> SimulateKnockoutRound(
@@ -355,7 +357,7 @@ public sealed class Wc2026SimulationRunner
         KnockoutSlotSpec slot,
         IReadOnlyDictionary<string, List<GroupStandingRow>> rankedByGroup,
         IReadOnlyList<GroupStandingRow> qualifiedThirds,
-        ISet<string> usedThirdGroups)
+        IReadOnlyDictionary<string, string> thirdPlaceAllocation)
     {
         if (slot.Rank is 1 or 2)
         {
@@ -369,20 +371,20 @@ public sealed class Wc2026SimulationRunner
 
         if (slot.Rank == 3)
         {
-            foreach (var row in qualifiedThirds)
+            var anchor = slot.ThirdPlaceAnchor;
+            if (!string.IsNullOrWhiteSpace(anchor) && thirdPlaceAllocation.TryGetValue(anchor, out var allocatedThirdSlot))
             {
-                if (usedThirdGroups.Contains(row.GroupCode))
-                    continue;
-                if (slot.Groups.Count == 0 || slot.Groups.Contains(row.GroupCode, StringComparer.OrdinalIgnoreCase))
-                {
-                    usedThirdGroups.Add(row.GroupCode);
+                var allocatedGroup = allocatedThirdSlot.Trim().TrimStart('3').ToUpperInvariant();
+                var row = qualifiedThirds.FirstOrDefault(x => string.Equals(x.GroupCode, allocatedGroup, StringComparison.OrdinalIgnoreCase));
+                if (row is not null)
                     return row.Team;
-                }
             }
 
+            // Should be unreachable when the official table covers the qualified third-place set.
+            // Keep a safe fallback so malformed custom calendars do not crash the full simulation.
             foreach (var row in qualifiedThirds)
             {
-                if (usedThirdGroups.Add(row.GroupCode))
+                if (slot.Groups.Count == 0 || slot.Groups.Contains(row.GroupCode, StringComparer.OrdinalIgnoreCase))
                     return row.Team;
             }
         }
@@ -391,67 +393,56 @@ public sealed class Wc2026SimulationRunner
     }
 
     private static KnockoutBracketPlan BuildKnockoutBracketRules(Wc2026CalendarSet? calendar, Wc2026GroupSet groups)
+        => new("official_hardcoded_r32_and_path", BuildOfficialRoundOf32Rules());
+
+    private static List<KnockoutBracketRule> BuildOfficialRoundOf32Rules()
     {
-        var fromCalendar = calendar?.Matches
-            .Where(m => string.Equals(m.Stage, "round_of_32", StringComparison.OrdinalIgnoreCase))
-            .OrderBy(m => m.StartUtc ?? DateTimeOffset.MaxValue)
-            .ThenBy(m => m.EventId)
-            .Select((m, index) => new KnockoutBracketRule(
-                MatchNumber: index + 1,
-                Source: "sofascore_calendar_round_of_32",
-                Slot1: ParseKnockoutSlot(m.HomeTeam),
-                Slot2: ParseKnockoutSlot(m.AwayTeam)))
-            .Where(r => r.Slot1.Rank is not null && r.Slot2.Rank is not null)
-            .ToList() ?? [];
-
-        if (fromCalendar.Count == 16)
-            return new KnockoutBracketPlan("sofascore_calendar_round_of_32_placeholders", fromCalendar);
-
-        return new KnockoutBracketPlan("hardcoded_mvp_fallback_bracket", BuildFallbackRoundOf32Rules(groups));
-    }
-
-    private static List<KnockoutBracketRule> BuildFallbackRoundOf32Rules(Wc2026GroupSet groups)
-    {
-        var codes = groups.Groups.Select(g => g.GroupCode).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).Take(12).ToList();
-        string Code(int index) => index < codes.Count ? codes[index] : ((char)('A' + index)).ToString();
-
         var raw = new (string Slot1, string Slot2)[]
         {
-            ($"1{Code(0)}", $"3{Code(0)}/{Code(1)}/{Code(2)}/{Code(3)}"),
-            ($"1{Code(1)}", $"3{Code(4)}/{Code(5)}/{Code(6)}/{Code(7)}"),
-            ($"1{Code(2)}", $"3{Code(8)}/{Code(9)}/{Code(10)}/{Code(11)}"),
-            ($"1{Code(3)}", $"3{Code(0)}/{Code(4)}/{Code(8)}/{Code(11)}"),
-            ($"1{Code(4)}", $"3{Code(1)}/{Code(5)}/{Code(9)}/{Code(10)}"),
-            ($"1{Code(5)}", $"3{Code(2)}/{Code(6)}/{Code(7)}/{Code(11)}"),
-            ($"1{Code(6)}", $"3{Code(3)}/{Code(7)}/{Code(8)}/{Code(9)}"),
-            ($"1{Code(7)}", $"3{Code(0)}/{Code(5)}/{Code(6)}/{Code(10)}"),
-            ($"1{Code(8)}", $"2{Code(9)}"),
-            ($"1{Code(9)}", $"2{Code(8)}"),
-            ($"1{Code(10)}", $"2{Code(11)}"),
-            ($"1{Code(11)}", $"2{Code(10)}"),
-            ($"2{Code(0)}", $"2{Code(1)}"),
-            ($"2{Code(2)}", $"2{Code(3)}"),
-            ($"2{Code(4)}", $"2{Code(5)}"),
-            ($"2{Code(6)}", $"2{Code(7)}")
+            ("1E", "3A/3B/3C/3D/3F"),
+            ("1I", "3C/3D/3F/3G/3H"),
+            ("2A", "2B"),
+            ("1F", "2C"),
+
+            ("2K", "2L"),
+            ("1H", "2J"),
+            ("1D", "3B/3E/3F/3I/3J"),
+            ("1G", "3A/3E/3H/3I/3J"),
+
+            ("1C", "2F"),
+            ("2E", "2I"),
+            ("1A", "3C/3E/3F/3H/3I"),
+            ("1L", "3E/3H/3I/3J/3K"),
+
+            ("1J", "2H"),
+            ("2D", "2G"),
+            ("1B", "3E/3F/3G/3I/3J"),
+            ("1K", "3D/3E/3I/3J/3L")
         };
 
         return raw.Select((x, index) => new KnockoutBracketRule(
             MatchNumber: index + 1,
-            Source: "hardcoded_mvp_fallback_bracket",
+            Source: "official_hardcoded_r32_and_path",
             Slot1: ParseKnockoutSlot(x.Slot1),
-            Slot2: ParseKnockoutSlot(x.Slot2))).ToList();
+            Slot2: ParseKnockoutSlot(x.Slot2, GetThirdPlaceAnchor(x.Slot1)))).ToList();
     }
 
-    private static KnockoutSlotSpec ParseKnockoutSlot(string raw)
+    private static string? GetThirdPlaceAnchor(string oppositeSlot)
+    {
+        var parsed = ParseKnockoutSlot(oppositeSlot);
+        return parsed.Rank == 1 && parsed.Groups.Count == 1 ? $"1{parsed.Groups[0]}" : null;
+    }
+
+    private static KnockoutSlotSpec ParseKnockoutSlot(string raw, string? thirdPlaceAnchor = null)
     {
         var value = NormalizeSlotText(raw);
         if (string.IsNullOrWhiteSpace(value))
-            return new KnockoutSlotSpec(raw, null, []);
+            return new KnockoutSlotSpec(raw, null, [], thirdPlaceAnchor);
 
         var rank = TryParseRank(value);
         var groups = ExtractGroupCodes(value);
         var canonical = CanonicalizeSlot(raw, rank, groups);
-        return new KnockoutSlotSpec(canonical, rank, groups);
+        return new KnockoutSlotSpec(canonical, rank, groups, thirdPlaceAnchor);
     }
 
     private static string NormalizeSlotText(string raw)
@@ -870,6 +861,203 @@ public sealed class Wc2026SimulationRunner
     private static double Round(double value) => Math.Round(value, 6);
     private static double RoundProbability(int count, int iterations) => Round(count / (double)iterations);
 
+
+    private sealed class OfficialThirdPlaceAllocationTable
+    {
+        private static readonly string[] ThirdWinnerAnchors = ["1A", "1B", "1D", "1E", "1G", "1I", "1K", "1L"];
+
+        private static readonly IReadOnlyDictionary<string, string[]> AllowedThirdGroupsByAnchor = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["1A"] = ["C", "E", "F", "H", "I"],
+            ["1B"] = ["E", "F", "G", "I", "J"],
+            ["1D"] = ["B", "E", "F", "I", "J"],
+            ["1E"] = ["A", "B", "C", "D", "F"],
+            ["1G"] = ["A", "E", "H", "I", "J"],
+            ["1I"] = ["C", "D", "F", "G", "H"],
+            ["1K"] = ["D", "E", "I", "J", "L"],
+            ["1L"] = ["E", "H", "I", "J", "K"]
+        };
+
+        private OfficialThirdPlaceAllocationTable(string source, Dictionary<string, Dictionary<string, string>> rows)
+        {
+            Source = source;
+            Rows = rows;
+        }
+
+        public string Source { get; }
+        public int RowCount => Rows.Count;
+        private Dictionary<string, Dictionary<string, string>> Rows { get; }
+
+        public static OfficialThirdPlaceAllocationTable CreateDefault()
+        {
+            var csvPath = TryFindAnnexCsv();
+            if (csvPath is not null)
+                return new OfficialThirdPlaceAllocationTable($"csv:{csvPath}", LoadFromCsv(csvPath));
+
+            // Fallback table keeps the simulator usable even when the external CSV is not
+            // deployed. The preferred production path is the CSV table at
+            // data/raw/bracket/third-place-allocation-annex-c.csv.
+            var rows = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var groups in Combinations(["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L"], 8))
+            {
+                var key = string.Concat(groups.OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+                rows[key] = BuildAllocationFor(groups);
+            }
+
+            return new OfficialThirdPlaceAllocationTable("generated_fallback_from_official_slot_pools", rows);
+        }
+
+        private static string? TryFindAnnexCsv()
+        {
+            const string relative = "data/raw/bracket/third-place-allocation-annex-c.csv";
+            var candidates = new List<string>
+            {
+                Path.Combine(Environment.CurrentDirectory, relative),
+                Path.Combine(AppContext.BaseDirectory, relative)
+            };
+
+            var dir = new DirectoryInfo(Environment.CurrentDirectory);
+            for (var i = 0; i < 6 && dir is not null; i++, dir = dir.Parent)
+                candidates.Add(Path.Combine(dir.FullName, relative));
+
+            return candidates.FirstOrDefault(File.Exists);
+        }
+
+        private static Dictionary<string, Dictionary<string, string>> LoadFromCsv(string path)
+        {
+            var rows = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+            var lines = File.ReadAllLines(path);
+            foreach (var line in lines.Skip(1))
+            {
+                if (string.IsNullOrWhiteSpace(line))
+                    continue;
+
+                var cells = SimpleCsv.ParseLine(line).Select(x => x.Trim()).ToList();
+                if (cells.Count < 9)
+                    continue;
+
+                var key = string.Concat(cells[0].Where(char.IsLetter).Select(char.ToUpperInvariant).OrderBy(x => x));
+                rows[key] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["1A"] = NormalizeThirdSlot(cells[1]),
+                    ["1B"] = NormalizeThirdSlot(cells[2]),
+                    ["1D"] = NormalizeThirdSlot(cells[3]),
+                    ["1E"] = NormalizeThirdSlot(cells[4]),
+                    ["1G"] = NormalizeThirdSlot(cells[5]),
+                    ["1I"] = NormalizeThirdSlot(cells[6]),
+                    ["1K"] = NormalizeThirdSlot(cells[7]),
+                    ["1L"] = NormalizeThirdSlot(cells[8])
+                };
+            }
+
+            if (rows.Count != 495)
+                throw new InvalidOperationException($"Third-place allocation CSV must contain 495 rows, but found {rows.Count}: {path}");
+
+            return rows;
+        }
+
+        private static string NormalizeThirdSlot(string value)
+        {
+            var group = new string((value ?? string.Empty).Where(char.IsLetter).Select(char.ToUpperInvariant).ToArray());
+            if (group.Length != 1 || group[0] < 'A' || group[0] > 'L')
+                throw new InvalidOperationException($"Invalid third-place allocation slot: '{value}'.");
+            return $"3{group}";
+        }
+
+        public IReadOnlyDictionary<string, string> Resolve(IEnumerable<string> qualifiedThirdGroups)
+        {
+            var key = string.Concat(qualifiedThirdGroups
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x.Trim().ToUpperInvariant())
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase));
+
+            if (Rows.TryGetValue(key, out var row))
+                return row;
+
+            throw new InvalidOperationException($"No third-place allocation row found for qualified third-place groups '{key}'. Expected exactly 8 groups A-L.");
+        }
+
+        private static Dictionary<string, string> BuildAllocationFor(IReadOnlyList<string> groups)
+        {
+            var groupSet = groups.Select(x => x.ToUpperInvariant()).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var best = Search(0, new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            if (best is null)
+                throw new InvalidOperationException($"Could not build third-place allocation for key '{string.Concat(groups)}'.");
+            return best;
+
+            Dictionary<string, string>? Search(int anchorIndex, Dictionary<string, string> current, HashSet<string> usedGroups)
+            {
+                if (anchorIndex >= ThirdWinnerAnchors.Length)
+                    return new Dictionary<string, string>(current, StringComparer.OrdinalIgnoreCase);
+
+                var anchor = ThirdWinnerAnchors[anchorIndex];
+                var candidates = AllowedThirdGroupsByAnchor[anchor]
+                    .Where(groupSet.Contains)
+                    .Where(g => !usedGroups.Contains(g))
+                    .OrderByDescending(g => GroupPreference(anchor, g))
+                    .ThenBy(g => g, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                foreach (var group in candidates)
+                {
+                    current[anchor] = $"3{group}";
+                    usedGroups.Add(group);
+                    var result = Search(anchorIndex + 1, current, usedGroups);
+                    if (result is not null)
+                        return result;
+                    usedGroups.Remove(group);
+                    current.Remove(anchor);
+                }
+
+                return null;
+            }
+        }
+
+        private static int GroupPreference(string anchor, string group)
+        {
+            // Slot-specific preferences make the valid matching deterministic and stable.
+            // They are not used for ranking teams; they only break ties between legal third-place slots.
+            var preference = anchor switch
+            {
+                "1A" => "HCEFI",
+                "1B" => "JGEFI",
+                "1D" => "BIEJF",
+                "1E" => "CDBFA",
+                "1G" => "AHIJE",
+                "1I" => "FGHCD",
+                "1K" => "LDEIJ",
+                "1L" => "KEHJI",
+                _ => "ABCDEFGHIJKL"
+            };
+
+            var index = preference.IndexOf(group, StringComparison.OrdinalIgnoreCase);
+            return index < 0 ? 0 : preference.Length - index;
+        }
+
+        private static IEnumerable<List<string>> Combinations(IReadOnlyList<string> values, int take)
+        {
+            var buffer = new string[take];
+            foreach (var row in Recurse(0, 0))
+                yield return row;
+
+            IEnumerable<List<string>> Recurse(int start, int depth)
+            {
+                if (depth == take)
+                {
+                    yield return buffer.ToList();
+                    yield break;
+                }
+
+                for (var i = start; i <= values.Count - (take - depth); i++)
+                {
+                    buffer[depth] = values[i];
+                    foreach (var row in Recurse(i + 1, depth + 1))
+                        yield return row;
+                }
+            }
+        }
+    }
+
     private sealed class StringTupleComparer : IEqualityComparer<(string First, string Second)>
     {
         public static readonly StringTupleComparer OrdinalIgnoreCase = new();
@@ -884,7 +1072,7 @@ public sealed class Wc2026SimulationRunner
 
     private sealed record KnockoutBracketPlan(string Source, List<KnockoutBracketRule> Rules);
     private sealed record KnockoutBracketRule(int MatchNumber, string Source, KnockoutSlotSpec Slot1, KnockoutSlotSpec Slot2);
-    private sealed record KnockoutSlotSpec(string Raw, int? Rank, List<string> Groups);
+    private sealed record KnockoutSlotSpec(string Raw, int? Rank, List<string> Groups, string? ThirdPlaceAnchor = null);
 
     private sealed record TeamRef(string GroupCode, string Team);
     private sealed record OutcomeProbabilities(double HomeWin, double Draw, double AwayWin);
