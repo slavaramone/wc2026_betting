@@ -49,6 +49,7 @@ internal static class CliApplication
                 "compare-stage-exit-markets" => await RunCompareStageExitMarketsAsync(options, cancellationToken),
                 "model-stability-report" => await RunModelStabilityReportAsync(options, cancellationToken),
                 "stage-exit-stability-report" => await RunStageExitStabilityReportAsync(options, cancellationToken),
+                "market-power-stage-exit-review" => await RunMarketPowerStageExitReviewAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
         }
@@ -409,6 +410,50 @@ internal static class CliApplication
     }
 
 
+    private static async Task<int> RunMarketPowerStageExitReviewAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports", "market-power-stage-exit"));
+        var stageExitOddsFile = options.GetAny(["stage-exit-odds-file", "stage-odds-file"], string.Empty);
+        var iterations = options.GetInt("iterations", 10000);
+        var seed = options.GetInt("seed", 2026);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Building market-power stage-exit review...");
+        var reviewer = new MarketPowerStageExitReviewer();
+        var report = await reviewer.BuildAsync(
+            modelsFolder,
+            stageExitOddsFile,
+            outputFolder,
+            iterations,
+            seed,
+            minEdge,
+            overwrite,
+            cancellationToken);
+
+        Console.WriteLine("MARKET-POWER STAGE-EXIT REVIEW RESULT");
+        Console.WriteLine($"Ratings: {report.RatingCount}");
+        Console.WriteLine($"Current strict BET rows: {report.CurrentStrictBetRows}");
+        Console.WriteLine($"Market-power strict BET rows: {report.MarketPowerStrictBetRows}");
+        Console.WriteLine($"Stable strict rows: {report.StableStrictRows.Count}");
+        Console.WriteLine($"Watchlist rows: {report.WatchlistRows.Count}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        Console.WriteLine();
+        Console.WriteLine("Watchlist review:");
+        foreach (var row in report.WatchlistRows)
+            Console.WriteLine($"  {row.GroupCode} | {row.Market} | {row.Selection} | {row.Side} @ {row.BookOdds:0.###} | current {row.CurrentProbability:P1} edge {row.CurrentEdgeProbability:P1} | market-power {row.MarketPowerProbability:P1} edge {row.MarketPowerEdgeProbability:P1} | stable strict {row.StableStrictBet}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top market-power ratings:");
+        foreach (var rating in report.TopMarketPowerRatings.Take(12))
+            Console.WriteLine($"  {rating.GroupCode} | {rating.Team}: {rating.Rating} | avg EP {rating.AvgExpectedPoints:0.###}");
+
+        return 0;
+    }
+
+
     private static async Task<int> RunValidateModelsAsync(CliOptions options, CancellationToken cancellationToken)
     {
         var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
@@ -479,6 +524,7 @@ internal static class CliApplication
         Console.WriteLine("  compare-stage-exit-markets  Compare stage-exit market odds against knockout simulation");
         Console.WriteLine("  model-stability-report  Run several simulation blends and report stable group-market edges");
         Console.WriteLine("  stage-exit-stability-report  Run several simulation blends and report stable stage-exit edges");
+        Console.WriteLine("  market-power-stage-exit-review  Stress-test stage-exit predictions with market-implied team power");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore");
@@ -491,6 +537,7 @@ internal static class CliApplication
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- compare-stage-exit-markets --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- model-stability-report --models-folder C:\Temp\wc26\models --group-results-odds-file data\raw\odds\wc2026_group_stage_results_market_odds_2026-05-26.csv --finish-higher-odds-file data\raw\odds\wc2026_finish_higher_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\model-stability --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- stage-exit-stability-report --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\stage-exit-stability --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- market-power-stage-exit-review --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\market-power-stage-exit --overwrite");
         Console.WriteLine();
         Console.WriteLine("Options for grab-sofascore:");
         Console.WriteLine("  --destination-folder <path>   Output directory. Alias: --output. Default: data/raw/sofascore");
@@ -537,6 +584,16 @@ internal static class CliApplication
         Console.WriteLine("  --seed <n>                          Random seed for every blend. Default: 2026");
         Console.WriteLine("  --min-edge <probability>            Base BET threshold for comparison. Default: 0.03");
         Console.WriteLine("  --overwrite                         Overwrite existing stability files");
+        Console.WriteLine();
+
+        Console.WriteLine("Options for market-power-stage-exit-review:");
+        Console.WriteLine("  --models-folder <path>              Folder containing generated model sets. Default: data/models");
+        Console.WriteLine("  --stage-exit-odds-file <path>       Parsed stage-exit market CSV. Alias: --stage-odds-file");
+        Console.WriteLine("  --output-folder <path>              Report output folder. Default: <models-folder>/reports/market-power-stage-exit");
+        Console.WriteLine("  --iterations <n>                    Monte Carlo iterations per engine. Default: 10000");
+        Console.WriteLine("  --seed <n>                          Random seed. Default: 2026");
+        Console.WriteLine("  --min-edge <probability>            Base BET threshold for comparison. Default: 0.03");
+        Console.WriteLine("  --overwrite                         Overwrite existing report files");
         Console.WriteLine();
         Console.WriteLine("Options for compare-group-markets:");
         Console.WriteLine("  --models-folder <path>              Folder containing generated model sets and simulation output. Default: data/models");
