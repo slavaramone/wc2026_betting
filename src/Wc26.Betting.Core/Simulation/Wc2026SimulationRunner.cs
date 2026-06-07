@@ -97,6 +97,7 @@ public sealed class Wc2026SimulationRunner
         var thirdPlaceAllocationTable = OfficialThirdPlaceAllocationTable.CreateDefault();
         var pairHigherCounts = new Dictionary<(string Higher, string Lower), int>(StringTupleComparer.OrdinalIgnoreCase);
         var tournamentHigherCounts = new Dictionary<(string Higher, string Lower), int>(StringTupleComparer.OrdinalIgnoreCase);
+        var bestConfederationCounts = new Dictionary<(string Confederation, string Team), int>(StringTupleComparer.OrdinalIgnoreCase);
         var oddsByEventId = odds.Matches
             .Where(x => x.CalendarEventId is not null)
             .GroupBy(x => x.CalendarEventId!.Value)
@@ -163,6 +164,7 @@ public sealed class Wc2026SimulationRunner
             var tournamentRanks = BuildInitialTournamentRanks(allTeams, rankedByGroup, qualifiedThirds, rng);
             SimulateKnockout(rankedByGroup, qualifiedThirds, knockoutRules, thirdPlaceAllocationTable, accum, tournamentRanks, eloByTeam, seedByTeam, activeWeights, rng);
             CountTournamentHigherPairs(tournamentRanks, tournamentHigherCounts);
+            CountBestConfederationTeams(tournamentRanks, bestConfederationCounts);
         }
 
         var teamSummaries = allTeams.Select(x =>
@@ -276,6 +278,21 @@ public sealed class Wc2026SimulationRunner
                 }))
             .ToList();
 
+        var bestConfederationSummaries = allTeams
+            .Select(x => new { x.Team, x.GroupCode, Info = TeamConfederationCatalog.TryGetByTeam(x.Team) })
+            .Where(x => x.Info is not null)
+            .Select(x => new Wc2026SimulationBestConfederationTeamSummary
+            {
+                Confederation = x.Info!.Confederation,
+                Team = x.Team,
+                GroupCode = x.GroupCode,
+                BestInConfederationProbability = RoundProbability(bestConfederationCounts.GetValueOrDefault((x.Info!.Confederation, x.Team)), iterations)
+            })
+            .OrderBy(x => x.Confederation, StringComparer.OrdinalIgnoreCase)
+            .ThenByDescending(x => x.BestInConfederationProbability)
+            .ThenBy(x => x.Team, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         return new Wc2026SimulationResultSet
         {
             ModelsFolder = modelsFolder,
@@ -300,7 +317,8 @@ public sealed class Wc2026SimulationRunner
             Teams = teamSummaries,
             Groups = groupSummaries,
             PairComparisons = pairSummaries,
-            TournamentPairComparisons = tournamentPairSummaries
+            TournamentPairComparisons = tournamentPairSummaries,
+            BestConfederationTeams = bestConfederationSummaries
         };
     }
 
@@ -369,6 +387,33 @@ public sealed class Wc2026SimulationRunner
                 var lower = ReferenceEquals(higher, first) ? second : first;
                 higherCounts[(higher.Team, lower.Team)] = higherCounts.GetValueOrDefault((higher.Team, lower.Team)) + 1;
             }
+        }
+    }
+
+    private static void CountBestConfederationTeams(
+        IReadOnlyDictionary<string, TournamentRankRow> tournamentRanks,
+        Dictionary<(string Confederation, string Team), int> bestCounts)
+    {
+        var rowsByConfederation = tournamentRanks.Values
+            .Select(row => new { Row = row, Info = TeamConfederationCatalog.TryGetByTeam(row.Team) })
+            .Where(x => x.Info is not null)
+            .GroupBy(x => x.Info!.Confederation, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var group in rowsByConfederation)
+        {
+            var best = group
+                .Select(x => x.Row)
+                .OrderBy(x => x, Comparer<TournamentRankRow>.Create(CompareTournamentRank))
+                .FirstOrDefault();
+
+            if (best is null)
+                continue;
+
+            var info = TeamConfederationCatalog.TryGetByTeam(best.Team);
+            if (info is null)
+                continue;
+
+            bestCounts[(info.Confederation, best.Team)] = bestCounts.GetValueOrDefault((info.Confederation, best.Team)) + 1;
         }
     }
 
@@ -860,6 +905,7 @@ public sealed class Wc2026SimulationRunner
         await WriteGroupCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-group-probabilities.csv"), result, overwrite, cancellationToken);
         await WritePairComparisonCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-pair-comparisons.csv"), result, overwrite, cancellationToken);
         await WriteTournamentPairComparisonCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-tournament-pair-comparisons.csv"), result, overwrite, cancellationToken);
+        await WriteBestConfederationCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-best-confederation-team-probabilities.csv"), result, overwrite, cancellationToken);
         await WriteStageProbabilityCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-stage-probabilities.csv"), result, overwrite, cancellationToken);
         await WriteKnockoutBracketRulesCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-knockout-bracket-rules.csv"), result, overwrite, cancellationToken);
     }
@@ -956,6 +1002,23 @@ public sealed class Wc2026SimulationRunner
         }
     }
 
+
+    private static async Task WriteBestConfederationCsvAsync(string path, Wc2026SimulationResultSet result, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"File already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("confederation,team,group_code,best_in_confederation_probability");
+        foreach (var row in result.BestConfederationTeams.OrderBy(x => x.Confederation).ThenByDescending(x => x.BestInConfederationProbability))
+        {
+            var values = new[]
+            {
+                row.Confederation, row.Team, row.GroupCode, row.BestInConfederationProbability.ToString("0.######")
+            };
+            await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+        }
+    }
 
     private static async Task WriteStageProbabilityCsvAsync(string path, Wc2026SimulationResultSet result, bool overwrite, CancellationToken cancellationToken)
     {

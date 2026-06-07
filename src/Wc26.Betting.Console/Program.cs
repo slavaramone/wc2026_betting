@@ -49,9 +49,11 @@ internal static class CliApplication
                 "compare-stage-exit-markets" => await RunCompareStageExitMarketsAsync(options, cancellationToken),
                 "compare-stage-reach-markets" => await RunCompareStageReachMarketsAsync(options, cancellationToken),
                 "compare-tournament-higher-markets" => await RunCompareTournamentHigherMarketsAsync(options, cancellationToken),
+                "compare-best-confederation-team-markets" => await RunCompareBestConfederationTeamMarketsAsync(options, cancellationToken),
                 "model-stability-report" => await RunModelStabilityReportAsync(options, cancellationToken),
                 "stage-exit-stability-report" => await RunStageExitStabilityReportAsync(options, cancellationToken),
                 "tournament-higher-stability-report" => await RunTournamentHigherStabilityReportAsync(options, cancellationToken),
+                "best-confederation-team-stability-report" => await RunBestConfederationTeamStabilityReportAsync(options, cancellationToken),
                 "market-power-stage-exit-review" => await RunMarketPowerStageExitReviewAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
@@ -403,6 +405,43 @@ internal static class CliApplication
     }
 
 
+    private static async Task<int> RunCompareBestConfederationTeamMarketsAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports"));
+        var oddsFile = options.GetAny(["best-confederation-odds-file", "best-confed-odds-file", "odds-file"], string.Empty);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Comparing best-confederation-team market odds against full tournament simulation probabilities...");
+        var comparer = new BestConfederationTeamMarketOddsComparer();
+        var result = await comparer.CompareFromFilesAsync(
+            modelsFolder,
+            oddsFile,
+            outputFolder,
+            minEdge,
+            overwrite,
+            cancellationToken);
+
+        Console.WriteLine("BEST-CONFEDERATION-TEAM MARKET COMPARISON RESULT");
+        Console.WriteLine($"Rows: {result.Summary.Rows}");
+        Console.WriteLine($"Valid rows: {result.Summary.ValidRows}");
+        Console.WriteLine($"Invalid rows: {result.Summary.InvalidRows}");
+        Console.WriteLine($"BET rows: {result.Summary.BetRows}");
+        Console.WriteLine($"LEAN rows: {result.Summary.LeanRows}");
+        Console.WriteLine($"NO_BET rows: {result.Summary.NoBetRows}");
+        Console.WriteLine($"Strict BET rows: {result.Summary.StrictBetRows}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top edges:");
+        foreach (var edge in result.Summary.TopEdges.Take(15))
+            Console.WriteLine($"  {edge.Confederation} | {edge.Selection} @ {edge.BookOdds:0.###} | sim {edge.SimulationProbability:P1} | book {edge.BookProbabilityUsed:P1} | edge {edge.EdgeProbability:P1}");
+
+        return 0;
+    }
+
+
     private static async Task<int> RunModelStabilityReportAsync(CliOptions options, CancellationToken cancellationToken)
     {
         var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
@@ -531,6 +570,51 @@ internal static class CliApplication
     }
 
 
+    private static async Task<int> RunBestConfederationTeamStabilityReportAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports", "best-confederation-team-stability"));
+        var oddsFile = options.GetAny(["best-confederation-odds-file", "best-confed-odds-file", "odds-file"], string.Empty);
+        var iterations = options.GetInt("iterations", 10000);
+        var seed = options.GetInt("seed", 2026);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Building best-confederation-team model stability report...");
+        var reporter = new BestConfederationTeamMarketStabilityReporter();
+        var report = await reporter.BuildAsync(
+            modelsFolder,
+            oddsFile,
+            outputFolder,
+            iterations,
+            seed,
+            minEdge,
+            overwrite,
+            cancellationToken);
+
+        Console.WriteLine("BEST-CONFEDERATION-TEAM STABILITY REPORT RESULT");
+        Console.WriteLine($"Blends: {report.Blends.Count}");
+        foreach (var blend in report.Blends)
+            Console.WriteLine($"  {blend.Label}: BET rows {blend.BetRows}, strict rows {blend.StrictBetRows}");
+        Console.WriteLine($"Candidates appearing as strict in at least one blend: {report.CandidateCount}");
+        Console.WriteLine($"Strong stable strict candidates across all blends: {report.StrongStableStrictBetCount}");
+        Console.WriteLine($"Soft stable strict candidates across all but one blend: {report.SoftStableStrictBetCount}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top strong stable best-confederation candidates:");
+        foreach (var c in report.StrongStableStrictBets.Take(15))
+            Console.WriteLine($"  {c.Confederation} | {c.Selection} @ {c.BookOdds:0.###} | strict {c.StrictBlendCount}/{c.BlendCount} | min edge {c.MinEdgeProbability:P1} | avg edge {c.AvgEdgeProbability:P1}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top soft stable best-confederation candidates:");
+        foreach (var c in report.SoftStableStrictBets.Take(15))
+            Console.WriteLine($"  {c.Confederation} | {c.Selection} @ {c.BookOdds:0.###} | strict {c.StrictBlendCount}/{c.BlendCount} | min edge {c.MinEdgeProbability:P1} | avg edge {c.AvgEdgeProbability:P1}");
+
+        return 0;
+    }
+
+
     private static async Task<int> RunMarketPowerStageExitReviewAsync(CliOptions options, CancellationToken cancellationToken)
     {
         var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
@@ -644,9 +728,11 @@ internal static class CliApplication
         Console.WriteLine("  compare-group-markets  Compare group/final-position market odds against simulation");
         Console.WriteLine("  compare-stage-exit-markets  Compare stage-exit market odds against knockout simulation");
         Console.WriteLine("  compare-stage-reach-markets  Compare stage-reach/winner market odds against knockout simulation");
+        Console.WriteLine("  compare-best-confederation-team-markets  Compare best-team-by-confederation odds against simulation");
         Console.WriteLine("  model-stability-report  Run several simulation blends and report stable group-market edges");
         Console.WriteLine("  stage-exit-stability-report  Run several simulation blends and report stable stage-exit edges");
         Console.WriteLine("  tournament-higher-stability-report  Run several simulation blends and report stable tournament-higher edges");
+        Console.WriteLine("  best-confederation-team-stability-report  Run several simulation blends and report stable best-confederation-team edges");
         Console.WriteLine("  market-power-stage-exit-review  Stress-test stage-exit predictions with market-implied team power");
         Console.WriteLine();
         Console.WriteLine("Examples:");
@@ -662,6 +748,8 @@ internal static class CliApplication
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- model-stability-report --models-folder C:\Temp\wc26\models --group-results-odds-file data\raw\odds\wc2026_group_stage_results_market_odds_2026-05-26.csv --finish-higher-odds-file data\raw\odds\wc2026_finish_higher_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\model-stability --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- stage-exit-stability-report --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\stage-exit-stability --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- tournament-higher-stability-report --models-folder C:\Temp\wc26\models --tournament-higher-odds-file data\raw\odds\wc2026_tournament_higher_market_odds_2026-06-04.csv --output-folder C:\Temp\wc26\reports\tournament-higher-stability --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- compare-best-confederation-team-markets --models-folder C:\Temp\wc26\models --best-confederation-odds-file data\raw\odds\wc2026_best_confederation_team_market_odds.csv --output-folder C:\Temp\wc26\reports --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- best-confederation-team-stability-report --models-folder C:\Temp\wc26\models --best-confederation-odds-file data\raw\odds\wc2026_best_confederation_team_market_odds.csv --output-folder C:\Temp\wc26\reports\best-confederation-team-stability --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- market-power-stage-exit-review --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\market-power-stage-exit --overwrite");
         Console.WriteLine();
         Console.WriteLine("Options for grab-sofascore:");
@@ -703,6 +791,22 @@ internal static class CliApplication
         Console.WriteLine("  --models-folder <path>                   Folder containing generated model sets. Default: data/models");
         Console.WriteLine("  --tournament-higher-odds-file <path>     Parsed tournament-higher market CSV. Aliases: --higher-odds-file, --odds-file");
         Console.WriteLine("  --output-folder <path>                   Report output folder. Default: <models-folder>/reports/tournament-higher-stability");
+        Console.WriteLine("  --iterations <n>                         Monte Carlo iterations per blend. Default: 10000");
+        Console.WriteLine("  --seed <n>                               Random seed for every blend. Default: 2026");
+        Console.WriteLine("  --min-edge <probability>                 Base BET threshold for comparison. Default: 0.03");
+        Console.WriteLine("  --overwrite                              Overwrite existing stability files");
+        Console.WriteLine();
+        Console.WriteLine("Options for compare-best-confederation-team-markets:");
+        Console.WriteLine("  --models-folder <path>                   Folder containing generated model sets. Default: data/models");
+        Console.WriteLine("  --best-confederation-odds-file <path>    Parsed best-team-by-confederation market CSV. Alias: --best-confed-odds-file, --odds-file");
+        Console.WriteLine("  --output-folder <path>                   Report output folder. Default: <models-folder>/reports");
+        Console.WriteLine("  --min-edge <probability>                 Base BET threshold. Default: 0.03");
+        Console.WriteLine("  --overwrite                              Overwrite existing report files");
+        Console.WriteLine();
+        Console.WriteLine("Options for best-confederation-team-stability-report:");
+        Console.WriteLine("  --models-folder <path>                   Folder containing generated model sets. Default: data/models");
+        Console.WriteLine("  --best-confederation-odds-file <path>    Parsed best-team-by-confederation market CSV. Alias: --best-confed-odds-file, --odds-file");
+        Console.WriteLine("  --output-folder <path>                   Report output folder. Default: <models-folder>/reports/best-confederation-team-stability");
         Console.WriteLine("  --iterations <n>                         Monte Carlo iterations per blend. Default: 10000");
         Console.WriteLine("  --seed <n>                               Random seed for every blend. Default: 2026");
         Console.WriteLine("  --min-edge <probability>                 Base BET threshold for comparison. Default: 0.03");

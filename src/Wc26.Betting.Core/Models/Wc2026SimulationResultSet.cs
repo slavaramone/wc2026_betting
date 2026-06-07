@@ -18,6 +18,7 @@ public sealed class Wc2026SimulationResultSet
     public List<Wc2026SimulationGroupSummary> Groups { get; init; } = [];
     public List<Wc2026SimulationPairComparisonSummary> PairComparisons { get; init; } = [];
     public List<Wc2026SimulationTournamentPairComparisonSummary> TournamentPairComparisons { get; init; } = [];
+    public List<Wc2026SimulationBestConfederationTeamSummary> BestConfederationTeams { get; init; } = [];
 }
 
 
@@ -47,6 +48,14 @@ public sealed class Wc2026SimulationTournamentPairComparisonSummary
     public string Team2 { get; init; } = string.Empty;
     public double Team1FinishHigherProbability { get; init; }
     public double Team2FinishHigherProbability { get; init; }
+}
+
+public sealed class Wc2026SimulationBestConfederationTeamSummary
+{
+    public string Confederation { get; init; } = string.Empty;
+    public string Team { get; init; } = string.Empty;
+    public string GroupCode { get; init; } = string.Empty;
+    public double BestInConfederationProbability { get; init; }
 }
 
 public sealed class Wc2026SimulationTeamSummary
