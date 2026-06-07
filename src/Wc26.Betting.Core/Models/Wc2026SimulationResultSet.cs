@@ -19,7 +19,16 @@ public sealed class Wc2026SimulationResultSet
     public List<Wc2026SimulationPairComparisonSummary> PairComparisons { get; init; } = [];
     public List<Wc2026SimulationTournamentPairComparisonSummary> TournamentPairComparisons { get; init; } = [];
     public List<Wc2026SimulationBestConfederationTeamSummary> BestConfederationTeams { get; init; } = [];
+    public List<Wc2026SimulationFinalistPairSummary> FinalistPairs { get; init; } = [];
 }
+
+public sealed class Wc2026SimulationFinalistPairSummary
+{
+    public string Team1 { get; init; } = string.Empty;
+    public string Team2 { get; init; } = string.Empty;
+    public double FinalistPairProbability { get; init; }
+}
+
 
 
 public sealed class Wc2026KnockoutBracketRuleSummary

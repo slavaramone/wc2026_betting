@@ -50,10 +50,16 @@ internal static class CliApplication
                 "compare-stage-reach-markets" => await RunCompareStageReachMarketsAsync(options, cancellationToken),
                 "compare-tournament-higher-markets" => await RunCompareTournamentHigherMarketsAsync(options, cancellationToken),
                 "compare-best-confederation-team-markets" => await RunCompareBestConfederationTeamMarketsAsync(options, cancellationToken),
+                "compare-winner-group-markets" => await RunCompareWinnerGroupMarketsAsync(options, cancellationToken),
+                "compare-winner-confederation-markets" => await RunCompareWinnerConfederationMarketsAsync(options, cancellationToken),
+                "compare-finalist-pair-markets" => await RunCompareFinalistPairMarketsAsync(options, cancellationToken),
                 "model-stability-report" => await RunModelStabilityReportAsync(options, cancellationToken),
                 "stage-exit-stability-report" => await RunStageExitStabilityReportAsync(options, cancellationToken),
                 "tournament-higher-stability-report" => await RunTournamentHigherStabilityReportAsync(options, cancellationToken),
                 "best-confederation-team-stability-report" => await RunBestConfederationTeamStabilityReportAsync(options, cancellationToken),
+                "winner-group-stability-report" => await RunWinnerGroupStabilityReportAsync(options, cancellationToken),
+                "winner-confederation-stability-report" => await RunWinnerConfederationStabilityReportAsync(options, cancellationToken),
+                "finalist-pair-stability-report" => await RunFinalistPairStabilityReportAsync(options, cancellationToken),
                 "market-power-stage-exit-review" => await RunMarketPowerStageExitReviewAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
@@ -442,6 +448,56 @@ internal static class CliApplication
     }
 
 
+
+
+    private static async Task<int> RunCompareWinnerGroupMarketsAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports"));
+        var oddsFile = options.GetAny(["winner-group-odds-file", "group-winner-odds-file", "odds-file"], string.Empty);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Comparing winner-group market odds against simulation winner probabilities...");
+        var comparer = new WinnerGroupMarketOddsComparer();
+        var result = await comparer.CompareFromFilesAsync(modelsFolder, oddsFile, outputFolder, minEdge, overwrite, cancellationToken);
+        PrintSimpleMarketResult("WINNER-GROUP MARKET COMPARISON RESULT", result, outputFolder);
+        return 0;
+    }
+
+
+    private static async Task<int> RunCompareWinnerConfederationMarketsAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports"));
+        var oddsFile = options.GetAny(["winner-confederation-odds-file", "confederation-winner-odds-file", "odds-file"], string.Empty);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Comparing winner-confederation market odds against simulation winner probabilities...");
+        var comparer = new WinnerConfederationMarketOddsComparer();
+        var result = await comparer.CompareFromFilesAsync(modelsFolder, oddsFile, outputFolder, minEdge, overwrite, cancellationToken);
+        PrintSimpleMarketResult("WINNER-CONFEDERATION MARKET COMPARISON RESULT", result, outputFolder);
+        return 0;
+    }
+
+
+    private static async Task<int> RunCompareFinalistPairMarketsAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports"));
+        var oddsFile = options.GetAny(["finalist-pair-odds-file", "final-pair-odds-file", "odds-file"], string.Empty);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Comparing finalist-pair market odds against simulation finalist pair probabilities...");
+        var comparer = new FinalistPairMarketOddsComparer();
+        var result = await comparer.CompareFromFilesAsync(modelsFolder, oddsFile, outputFolder, minEdge, overwrite, cancellationToken);
+        PrintSimpleMarketResult("FINALIST-PAIR MARKET COMPARISON RESULT", result, outputFolder);
+        return 0;
+    }
+
+
     private static async Task<int> RunModelStabilityReportAsync(CliOptions options, CancellationToken cancellationToken)
     {
         var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
@@ -615,6 +671,62 @@ internal static class CliApplication
     }
 
 
+
+
+    private static async Task<int> RunWinnerGroupStabilityReportAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports", "winner-group-stability"));
+        var oddsFile = options.GetAny(["winner-group-odds-file", "group-winner-odds-file", "odds-file"], string.Empty);
+        var iterations = options.GetInt("iterations", 10000);
+        var seed = options.GetInt("seed", 2026);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Building winner-group stability report...");
+        var reporter = new WinnerGroupMarketStabilityReporter();
+        var report = await reporter.BuildAsync(modelsFolder, oddsFile, outputFolder, iterations, seed, minEdge, overwrite, cancellationToken);
+        PrintSimpleStabilityResult("WINNER-GROUP STABILITY REPORT RESULT", report, outputFolder);
+        return 0;
+    }
+
+
+    private static async Task<int> RunWinnerConfederationStabilityReportAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports", "winner-confederation-stability"));
+        var oddsFile = options.GetAny(["winner-confederation-odds-file", "confederation-winner-odds-file", "odds-file"], string.Empty);
+        var iterations = options.GetInt("iterations", 10000);
+        var seed = options.GetInt("seed", 2026);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Building winner-confederation stability report...");
+        var reporter = new WinnerConfederationMarketStabilityReporter();
+        var report = await reporter.BuildAsync(modelsFolder, oddsFile, outputFolder, iterations, seed, minEdge, overwrite, cancellationToken);
+        PrintSimpleStabilityResult("WINNER-CONFEDERATION STABILITY REPORT RESULT", report, outputFolder);
+        return 0;
+    }
+
+
+    private static async Task<int> RunFinalistPairStabilityReportAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
+        var outputFolder = options.GetAny(["output-folder", "report-folder"], Path.Combine(modelsFolder, "reports", "finalist-pair-stability"));
+        var oddsFile = options.GetAny(["finalist-pair-odds-file", "final-pair-odds-file", "odds-file"], string.Empty);
+        var iterations = options.GetInt("iterations", 10000);
+        var seed = options.GetInt("seed", 2026);
+        var minEdge = options.GetDouble("min-edge", 0.03);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Building finalist-pair stability report...");
+        var reporter = new FinalistPairMarketStabilityReporter();
+        var report = await reporter.BuildAsync(modelsFolder, oddsFile, outputFolder, iterations, seed, minEdge, overwrite, cancellationToken);
+        PrintSimpleStabilityResult("FINALIST-PAIR STABILITY REPORT RESULT", report, outputFolder);
+        return 0;
+    }
+
+
     private static async Task<int> RunMarketPowerStageExitReviewAsync(CliOptions options, CancellationToken cancellationToken)
     {
         var modelsFolder = options.GetAny(["models-folder", "input-folder"], Path.Combine("data", "models"));
@@ -667,6 +779,49 @@ internal static class CliApplication
         PrintValidationSummary(report);
         return report.Errors.Count == 0 ? 0 : 1;
     }
+
+
+
+    private static void PrintSimpleMarketResult(string title, SimpleMarketComparisonResult result, string outputFolder)
+    {
+        Console.WriteLine(title);
+        Console.WriteLine($"Rows: {result.Summary.Rows}");
+        Console.WriteLine($"Valid rows: {result.Summary.ValidRows}");
+        Console.WriteLine($"Invalid rows: {result.Summary.InvalidRows}");
+        Console.WriteLine($"BET rows: {result.Summary.BetRows}");
+        Console.WriteLine($"LEAN rows: {result.Summary.LeanRows}");
+        Console.WriteLine($"NO_BET rows: {result.Summary.NoBetRows}");
+        Console.WriteLine($"Strict BET rows: {result.Summary.StrictBetRows}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top edges:");
+        foreach (var edge in result.Summary.TopEdges.Take(15))
+            Console.WriteLine($"  {edge.Segment} | {edge.Market} | {edge.Selection} | {edge.Side} @ {edge.BookOdds:0.###} | sim {edge.SimulationProbability:P1} | book {edge.BookProbabilityUsed:P1} | edge {edge.EdgeProbability:P1}");
+    }
+
+    private static void PrintSimpleStabilityResult(string title, SimpleMarketStabilityReport report, string outputFolder)
+    {
+        Console.WriteLine(title);
+        Console.WriteLine($"Blends: {report.Blends.Count}");
+        foreach (var blend in report.Blends)
+            Console.WriteLine($"  {blend.Label}: BET rows {blend.BetRows}, strict rows {blend.StrictBetRows}");
+        Console.WriteLine($"Candidates appearing as strict in at least one blend: {report.CandidateCount}");
+        Console.WriteLine($"Strong stable strict candidates across all blends: {report.StrongStableStrictBetCount}");
+        Console.WriteLine($"Soft stable strict candidates across all but one blend: {report.SoftStableStrictBetCount}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top strong stable candidates:");
+        foreach (var c in report.StrongStableStrictBets.Take(15))
+            Console.WriteLine($"  {c.Segment} | {c.Selection} | {c.Side} @ {c.BookOdds:0.###} | strict {c.StrictBlendCount}/{c.BlendCount} | min edge {c.MinEdgeProbability:P1} | avg edge {c.AvgEdgeProbability:P1}");
+
+        Console.WriteLine();
+        Console.WriteLine("Top soft stable candidates:");
+        foreach (var c in report.SoftStableStrictBets.Take(15))
+            Console.WriteLine($"  {c.Segment} | {c.Selection} | {c.Side} @ {c.BookOdds:0.###} | strict {c.StrictBlendCount}/{c.BlendCount} | min edge {c.MinEdgeProbability:P1} | avg edge {c.AvgEdgeProbability:P1}");
+    }
+
 
     private static void PrintValidationSummary(ModelValidationReport report)
     {
@@ -729,10 +884,16 @@ internal static class CliApplication
         Console.WriteLine("  compare-stage-exit-markets  Compare stage-exit market odds against knockout simulation");
         Console.WriteLine("  compare-stage-reach-markets  Compare stage-reach/winner market odds against knockout simulation");
         Console.WriteLine("  compare-best-confederation-team-markets  Compare best-team-by-confederation odds against simulation");
+        Console.WriteLine("  compare-winner-group-markets  Compare champion-from-group odds against simulation");
+        Console.WriteLine("  compare-winner-confederation-markets  Compare champion-from-confederation odds against simulation");
+        Console.WriteLine("  compare-finalist-pair-markets  Compare finalist-pair odds against simulation");
         Console.WriteLine("  model-stability-report  Run several simulation blends and report stable group-market edges");
         Console.WriteLine("  stage-exit-stability-report  Run several simulation blends and report stable stage-exit edges");
         Console.WriteLine("  tournament-higher-stability-report  Run several simulation blends and report stable tournament-higher edges");
         Console.WriteLine("  best-confederation-team-stability-report  Run several simulation blends and report stable best-confederation-team edges");
+        Console.WriteLine("  winner-group-stability-report  Run several simulation blends and report stable champion-from-group edges");
+        Console.WriteLine("  winner-confederation-stability-report  Run several simulation blends and report stable champion-from-confederation edges");
+        Console.WriteLine("  finalist-pair-stability-report  Run several simulation blends and report stable finalist-pair edges");
         Console.WriteLine("  market-power-stage-exit-review  Stress-test stage-exit predictions with market-implied team power");
         Console.WriteLine();
         Console.WriteLine("Examples:");

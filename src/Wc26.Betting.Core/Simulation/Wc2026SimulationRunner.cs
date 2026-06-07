@@ -98,6 +98,7 @@ public sealed class Wc2026SimulationRunner
         var pairHigherCounts = new Dictionary<(string Higher, string Lower), int>(StringTupleComparer.OrdinalIgnoreCase);
         var tournamentHigherCounts = new Dictionary<(string Higher, string Lower), int>(StringTupleComparer.OrdinalIgnoreCase);
         var bestConfederationCounts = new Dictionary<(string Confederation, string Team), int>(StringTupleComparer.OrdinalIgnoreCase);
+        var finalistPairCounts = new Dictionary<(string Team1, string Team2), int>(StringTupleComparer.OrdinalIgnoreCase);
         var oddsByEventId = odds.Matches
             .Where(x => x.CalendarEventId is not null)
             .GroupBy(x => x.CalendarEventId!.Value)
@@ -162,7 +163,8 @@ public sealed class Wc2026SimulationRunner
                 accum[row.Team].ThirdPlaceQualified++;
 
             var tournamentRanks = BuildInitialTournamentRanks(allTeams, rankedByGroup, qualifiedThirds, rng);
-            SimulateKnockout(rankedByGroup, qualifiedThirds, knockoutRules, thirdPlaceAllocationTable, accum, tournamentRanks, eloByTeam, seedByTeam, activeWeights, rng);
+            var finalists = SimulateKnockout(rankedByGroup, qualifiedThirds, knockoutRules, thirdPlaceAllocationTable, accum, tournamentRanks, eloByTeam, seedByTeam, activeWeights, rng);
+            CountFinalistPair(finalists, finalistPairCounts);
             CountTournamentHigherPairs(tournamentRanks, tournamentHigherCounts);
             CountBestConfederationTeams(tournamentRanks, bestConfederationCounts);
         }
@@ -293,6 +295,19 @@ public sealed class Wc2026SimulationRunner
             .ThenBy(x => x.Team, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+
+        var finalistPairSummaries = finalistPairCounts
+            .Select(x => new Wc2026SimulationFinalistPairSummary
+            {
+                Team1 = x.Key.Team1,
+                Team2 = x.Key.Team2,
+                FinalistPairProbability = RoundProbability(x.Value, iterations)
+            })
+            .OrderByDescending(x => x.FinalistPairProbability)
+            .ThenBy(x => x.Team1, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.Team2, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
         return new Wc2026SimulationResultSet
         {
             ModelsFolder = modelsFolder,
@@ -318,7 +333,8 @@ public sealed class Wc2026SimulationRunner
             Groups = groupSummaries,
             PairComparisons = pairSummaries,
             TournamentPairComparisons = tournamentPairSummaries,
-            BestConfederationTeams = bestConfederationSummaries
+            BestConfederationTeams = bestConfederationSummaries,
+            FinalistPairs = finalistPairSummaries
         };
     }
 
@@ -417,6 +433,19 @@ public sealed class Wc2026SimulationRunner
         }
     }
 
+    private static void CountFinalistPair(IReadOnlyList<string> finalists, Dictionary<(string Team1, string Team2), int> finalistPairCounts)
+    {
+        if (finalists.Count < 2)
+            return;
+
+        var a = finalists[0];
+        var b = finalists[1];
+        var ordered = string.Compare(a, b, StringComparison.OrdinalIgnoreCase) <= 0
+            ? (Team1: a, Team2: b)
+            : (Team1: b, Team2: a);
+        finalistPairCounts[ordered] = finalistPairCounts.GetValueOrDefault(ordered) + 1;
+    }
+
     private static int CompareTournamentRank(TournamentRankRow left, TournamentRankRow right)
     {
         // Higher tournament finish is primarily the furthest stage reached.
@@ -434,7 +463,7 @@ public sealed class Wc2026SimulationRunner
         return left.RandomTieBreaker.CompareTo(right.RandomTieBreaker);
     }
 
-    private static void SimulateKnockout(
+    private static List<string> SimulateKnockout(
         IReadOnlyDictionary<string, List<GroupStandingRow>> rankedByGroup,
         IReadOnlyList<GroupStandingRow> qualifiedThirds,
         KnockoutBracketPlan bracket,
@@ -467,6 +496,7 @@ public sealed class Wc2026SimulationRunner
         SetTournamentStage(tournamentRanks, final, 5);
         var winner = SimulateKnockoutRound(PairSequentially(final), accum, a => a.Winner++, eloByTeam, seedByTeam, weights, rng);
         SetTournamentStage(tournamentRanks, winner, 6);
+        return final;
     }
 
     private static List<string> SimulateKnockoutRound(
@@ -906,6 +936,9 @@ public sealed class Wc2026SimulationRunner
         await WritePairComparisonCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-pair-comparisons.csv"), result, overwrite, cancellationToken);
         await WriteTournamentPairComparisonCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-tournament-pair-comparisons.csv"), result, overwrite, cancellationToken);
         await WriteBestConfederationCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-best-confederation-team-probabilities.csv"), result, overwrite, cancellationToken);
+        await WriteWinnerGroupCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-winner-group-probabilities.csv"), result, overwrite, cancellationToken);
+        await WriteWinnerConfederationCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-winner-confederation-probabilities.csv"), result, overwrite, cancellationToken);
+        await WriteFinalistPairCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-finalist-pair-probabilities.csv"), result, overwrite, cancellationToken);
         await WriteStageProbabilityCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-stage-probabilities.csv"), result, overwrite, cancellationToken);
         await WriteKnockoutBracketRulesCsvAsync(Path.Combine(outputFolder, "wc2026-simulation-knockout-bracket-rules.csv"), result, overwrite, cancellationToken);
     }
@@ -1019,6 +1052,62 @@ public sealed class Wc2026SimulationRunner
             await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
         }
     }
+
+    private static async Task WriteWinnerGroupCsvAsync(string path, Wc2026SimulationResultSet result, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"File already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("group_code,winner_probability");
+        foreach (var row in result.Teams.GroupBy(x => x.GroupCode).OrderBy(x => x.Key))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var values = new[] { row.Key, row.Sum(x => x.WinnerProbability).ToString("0.######") };
+            await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+        }
+    }
+
+
+    private static async Task WriteWinnerConfederationCsvAsync(string path, Wc2026SimulationResultSet result, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"File already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("confederation,winner_probability");
+        var rows = result.Teams
+            .Select(x => new { Team = x, Info = TeamConfederationCatalog.TryGetByTeam(x.Team) })
+            .Where(x => x.Info is not null)
+            .GroupBy(x => x.Info!.Confederation, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var values = new[] { row.Key, row.Sum(x => x.Team.WinnerProbability).ToString("0.######") };
+            await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+        }
+    }
+
+
+    private static async Task WriteFinalistPairCsvAsync(string path, Wc2026SimulationResultSet result, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"File already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("team1,team2,finalist_pair_probability");
+        foreach (var row in result.FinalistPairs.OrderByDescending(x => x.FinalistPairProbability))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var values = new[]
+            {
+                row.Team1, row.Team2, row.FinalistPairProbability.ToString("0.######")
+            };
+            await writer.WriteLineAsync(string.Join(',', values.Select(SimpleCsv.Escape)));
+        }
+    }
+
 
     private static async Task WriteStageProbabilityCsvAsync(string path, Wc2026SimulationResultSet result, bool overwrite, CancellationToken cancellationToken)
     {
