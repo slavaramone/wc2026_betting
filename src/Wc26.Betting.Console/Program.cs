@@ -9,6 +9,7 @@ using Wc26.Betting.Core.TeamRatings;
 using Wc26.Betting.Core.Validation;
 using Wc26.Betting.ScoreModel.MarketXg;
 using Wc26.Betting.ScoreModel.ScoreMatrix;
+using Wc26.Betting.ScoreModel.GroupSimulation;
 
 var exitCode = await CliApplication.RunAsync(args, CancellationToken.None);
 return exitCode;
@@ -65,6 +66,7 @@ internal static class CliApplication
                 "market-power-stage-exit-review" => await RunMarketPowerStageExitReviewAsync(options, cancellationToken),
                 "build-market-xg" => await RunBuildMarketXgAsync(options, cancellationToken),
                 "build-score-matrix" => await RunBuildScoreMatrixAsync(options, cancellationToken),
+                "simulate-group-props" => await RunSimulateGroupPropsAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
         }
@@ -337,6 +339,61 @@ internal static class CliApplication
         }
 
         return result.InvalidFixtureCount == 0 && result.ValidationErrors.Count == 0 ? 0 : 1;
+    }
+
+
+    private static async Task<int> RunSimulateGroupPropsAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var scoreMatrixFile = options.GetAny(["score-matrix-file", "input-file"], string.Empty);
+        if (string.IsNullOrWhiteSpace(scoreMatrixFile))
+            throw new ArgumentException("--score-matrix-file is required. Use wc26-fixture-score-matrix.json or wc26-fixture-score-matrix.csv from build-score-matrix.");
+
+        var outputFolder = options.GetAny(["output-folder", "score-model-folder"], Path.Combine("data", "score-model"));
+        var iterations = options.GetInt("iterations", 200000);
+        var seed = options.GetInt("seed", 2026);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Running WC2026 group prop simulation from score matrix...");
+        var runner = new GroupPropSimulationRunner();
+        var result = await runner.RunAndWriteAsync(scoreMatrixFile, outputFolder, iterations, seed, overwrite, cancellationToken);
+
+        Console.WriteLine("GROUP PROP SIMULATION RESULT");
+        Console.WriteLine($"Source score matrix: {result.SourceScoreMatrixFile}");
+        Console.WriteLine($"Iterations: {result.Iterations}");
+        Console.WriteLine($"Seed: {result.Seed}");
+        Console.WriteLine($"Groups: {result.GroupCount}");
+        Console.WriteLine($"Fixtures: {result.FixtureCount}");
+        Console.WriteLine($"Valid fixtures: {result.ValidFixtureCount}");
+        Console.WriteLine($"Prop probability rows: {result.PropProbabilities.Count}");
+        Console.WriteLine($"Validation errors: {result.ValidationErrors.Count}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        if (result.Diagnostics.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Group simulation sanity:");
+            Console.WriteLine($"  Avg group goals: {result.Diagnostics.Average(x => x.AvgGoals):0.000}");
+            Console.WriteLine($"  Avg group draws: {result.Diagnostics.Average(x => x.AvgDraws):0.000}");
+            Console.WriteLine($"  Avg 0-0 matches: {result.Diagnostics.Average(x => x.AvgZeroZeroMatches):0.000}");
+        }
+
+        if (result.ValidationErrors.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Validation errors:");
+            foreach (var error in result.ValidationErrors.Take(30))
+                Console.WriteLine($"  {error}");
+        }
+
+        if (result.Warnings.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Warnings:");
+            foreach (var warning in result.Warnings.Take(30))
+                Console.WriteLine($"  {warning}");
+        }
+
+        return result.ValidationErrors.Count == 0 ? 0 : 1;
     }
 
 
@@ -1025,6 +1082,8 @@ internal static class CliApplication
         Console.WriteLine("  finalist-pair-stability-report  Run several simulation blends and report stable finalist-pair edges");
         Console.WriteLine("  market-power-stage-exit-review  Stress-test stage-exit predictions with market-implied team power");
         Console.WriteLine("  build-market-xg  Build market-implied fixture xG from 1X2 + total odds");
+        Console.WriteLine("  build-score-matrix  Build fixture score matrix from market-implied xG");
+        Console.WriteLine("  simulate-group-props  Simulate group special props from fixture score matrix");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore");
@@ -1043,6 +1102,8 @@ internal static class CliApplication
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- best-confederation-team-stability-report --models-folder C:\Temp\wc26\models --best-confederation-odds-file data\raw\odds\wc2026_best_confederation_team_market_odds.csv --output-folder C:\Temp\wc26\reports\best-confederation-team-stability --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- market-power-stage-exit-review --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\market-power-stage-exit --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-market-xg --match-odds-file data\raw\odds\wc2026_group_stage_fresh_odds_1x2_handicap_totals.csv --output-folder C:\Temp\wc26\score-model --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-score-matrix --market-xg-file C:\Temp\wc26\score-model\wc26-fixture-market-xg.json --output-folder C:\Temp\wc26\score-model --max-goals 10 --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- simulate-group-props --score-matrix-file C:\Temp\wc26\score-model\wc26-fixture-score-matrix.json --output-folder C:\Temp\wc26\score-model --iterations 200000 --seed 2026 --overwrite");
         Console.WriteLine();
         Console.WriteLine("Options for grab-sofascore:");
         Console.WriteLine("  --destination-folder <path>   Output directory. Alias: --output. Default: data/raw/sofascore");
