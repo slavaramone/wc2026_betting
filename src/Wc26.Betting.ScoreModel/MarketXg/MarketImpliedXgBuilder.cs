@@ -19,7 +19,7 @@ public sealed class MarketImpliedXgBuilder
         ["Canada"] = "B", ["Bosnia & Herzegovina"] = "B", ["Qatar"] = "B", ["Switzerland"] = "B",
         ["United States"] = "C", ["Paraguay"] = "C", ["Australia"] = "C", ["Turkey"] = "C",
         ["Brazil"] = "D", ["Morocco"] = "D", ["Haiti"] = "D", ["Scotland"] = "D",
-        ["Germany"] = "E", ["Curaçao"] = "E", ["Côte d'Ivoire"] = "E", ["Ecuador"] = "E",
+        ["Germany"] = "E", ["Curaçao"] = "E", ["Côte d'Ivoire"] = "E", ["Cote d'Ivoire"] = "E", ["Ivory Coast"] = "E", ["Ecuador"] = "E",
         ["Netherlands"] = "F", ["Japan"] = "F", ["Sweden"] = "F", ["Tunisia"] = "F",
         ["Spain"] = "G", ["Cabo Verde"] = "G", ["Saudi Arabia"] = "G", ["Uruguay"] = "G",
         ["Belgium"] = "H", ["Egypt"] = "H", ["Iran"] = "H", ["New Zealand"] = "H",
