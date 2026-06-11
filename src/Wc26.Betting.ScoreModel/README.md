@@ -49,3 +49,32 @@ Outputs:
 - `wc26-fixture-score-matrix-diagnostics.csv`
 
 `Probability` is normalized inside the 0..N score grid. `RawProbability` is the direct independent-Poisson probability before tail normalization. Use diagnostics `GridMass` to check tail loss.
+
+## Step 3: group prop simulation
+
+Simulate group special props from fixture score matrix:
+
+```bash
+dotnet run --project src/Wc26.Betting.Console -- simulate-group-props --score-matrix-file C:\Temp\wc26\score-model\wc26-fixture-score-matrix.json --output-folder C:\Temp\wc26\score-model --iterations 200000 --seed 2026 --overwrite
+```
+
+Outputs:
+
+- `wc26-group-prop-simulation.json`
+- `wc26-group-special-prop-probabilities.csv`
+- `wc26-group-simulation-diagnostics.csv`
+
+## Step 4: group prop market comparison
+
+Compare simulated prop probabilities with group special props odds:
+
+```bash
+dotnet run --project src/Wc26.Betting.Console -- compare-group-props --prop-probabilities-file C:\Temp\wc26\score-model\wc26-group-prop-simulation.json --prop-odds-file data\raw\odds\wc2026_group_special_props_score_modelable_odds.csv --output-folder C:\Temp\wc26\score-model --edge-threshold 0.08 --min-odds 1.60 --overwrite
+```
+
+Outputs:
+
+- `wc26-group-special-props-comparison.csv`
+- `wc26-group-special-props-edges.csv`
+- `wc26-group-special-props-comparison-diagnostics.csv`
+- `wc26-group-special-props-comparison.json`

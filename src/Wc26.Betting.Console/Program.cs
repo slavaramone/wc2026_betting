@@ -10,6 +10,7 @@ using Wc26.Betting.Core.Validation;
 using Wc26.Betting.ScoreModel.MarketXg;
 using Wc26.Betting.ScoreModel.ScoreMatrix;
 using Wc26.Betting.ScoreModel.GroupSimulation;
+using Wc26.Betting.ScoreModel.GroupPropComparison;
 
 var exitCode = await CliApplication.RunAsync(args, CancellationToken.None);
 return exitCode;
@@ -67,6 +68,7 @@ internal static class CliApplication
                 "build-market-xg" => await RunBuildMarketXgAsync(options, cancellationToken),
                 "build-score-matrix" => await RunBuildScoreMatrixAsync(options, cancellationToken),
                 "simulate-group-props" => await RunSimulateGroupPropsAsync(options, cancellationToken),
+                "compare-group-props" => await RunCompareGroupPropsAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
         }
@@ -394,6 +396,65 @@ internal static class CliApplication
         }
 
         return result.ValidationErrors.Count == 0 ? 0 : 1;
+    }
+
+    private static async Task<int> RunCompareGroupPropsAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var propProbabilitiesFile = options.GetAny(["prop-probabilities-file", "simulation-file", "model-probabilities-file", "input-file"], string.Empty);
+        if (string.IsNullOrWhiteSpace(propProbabilitiesFile))
+            throw new ArgumentException("--prop-probabilities-file is required. Use wc26-group-prop-simulation.json or wc26-group-special-prop-probabilities.csv from simulate-group-props.");
+
+        var propOddsFile = options.GetAny(["prop-odds-file", "odds-file"], string.Empty);
+        if (string.IsNullOrWhiteSpace(propOddsFile))
+            throw new ArgumentException("--prop-odds-file is required. Use wc2026_group_special_props_score_modelable_odds.csv.");
+
+        var outputFolder = options.GetAny(["output-folder", "score-model-folder"], Path.Combine("data", "score-model"));
+        var edgeThreshold = options.GetDouble("edge-threshold", 0.08d);
+        var minOdds = options.GetDouble("min-odds", 1.60d);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Comparing WC2026 group prop probabilities with book odds...");
+        var comparer = new GroupPropMarketComparer();
+        var result = await comparer.CompareAndWriteAsync(propProbabilitiesFile, propOddsFile, outputFolder, edgeThreshold, minOdds, overwrite, cancellationToken);
+
+        var betRowCount = result.Rows.Count(x => string.Equals(x.Decision, "BET", StringComparison.OrdinalIgnoreCase));
+
+        Console.WriteLine("GROUP PROP MARKET COMPARISON RESULT");
+        Console.WriteLine($"Source probabilities: {result.SourcePropProbabilitiesFile}");
+        Console.WriteLine($"Source odds: {result.SourcePropOddsFile}");
+        Console.WriteLine($"Odds rows: {result.OddsRows}");
+        Console.WriteLine($"Compared side rows: {result.ComparedRows}");
+        Console.WriteLine($"Missing model rows: {result.MissingModelRows}");
+        Console.WriteLine($"BET rows: {betRowCount}");
+        Console.WriteLine($"Warnings: {result.Warnings.Count}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        var topEdges = result.Rows
+            .Where(x => string.IsNullOrWhiteSpace(x.Warning))
+            .OrderByDescending(x => x.Edge)
+            .ThenByDescending(x => x.RoiAtBookOdds)
+            .Take(15)
+            .ToList();
+
+        if (topEdges.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Top edges:");
+            foreach (var row in topEdges)
+            {
+                Console.WriteLine($"  {row.GroupCode} | {row.BookMarketType} {row.Side} {row.Line:0.####} @ {row.BookOdds:0.###}: model {row.ModelProbability:P1}, book {row.BookNoVigProbability:P1}, edge {row.Edge:P1}, roi {row.RoiAtBookOdds:P1}, {row.Decision}");
+            }
+        }
+
+        if (result.Warnings.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Warnings:");
+            foreach (var warning in result.Warnings.Take(30))
+                Console.WriteLine($"  {warning}");
+        }
+
+        return result.MissingModelRows == 0 ? 0 : 1;
     }
 
 
@@ -1084,6 +1145,7 @@ internal static class CliApplication
         Console.WriteLine("  build-market-xg  Build market-implied fixture xG from 1X2 + total odds");
         Console.WriteLine("  build-score-matrix  Build fixture score matrix from market-implied xG");
         Console.WriteLine("  simulate-group-props  Simulate group special props from fixture score matrix");
+        Console.WriteLine("  compare-group-props  Compare group special prop probabilities with book odds");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore");
@@ -1104,6 +1166,7 @@ internal static class CliApplication
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-market-xg --match-odds-file data\raw\odds\wc2026_group_stage_fresh_odds_1x2_handicap_totals.csv --output-folder C:\Temp\wc26\score-model --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-score-matrix --market-xg-file C:\Temp\wc26\score-model\wc26-fixture-market-xg.json --output-folder C:\Temp\wc26\score-model --max-goals 10 --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- simulate-group-props --score-matrix-file C:\Temp\wc26\score-model\wc26-fixture-score-matrix.json --output-folder C:\Temp\wc26\score-model --iterations 200000 --seed 2026 --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- compare-group-props --prop-probabilities-file C:\Temp\wc26\score-model\wc26-group-prop-simulation.json --prop-odds-file data\raw\odds\wc2026_group_special_props_score_modelable_odds.csv --output-folder C:\Temp\wc26\score-model --edge-threshold 0.08 --min-odds 1.60 --overwrite");
         Console.WriteLine();
         Console.WriteLine("Options for grab-sofascore:");
         Console.WriteLine("  --destination-folder <path>   Output directory. Alias: --output. Default: data/raw/sofascore");
@@ -1229,6 +1292,21 @@ internal static class CliApplication
         Console.WriteLine("  --output-folder <path>        Output folder. Default: data/score-model");
         Console.WriteLine("  --max-goals <n>               Score grid 0..n. Default: 10");
         Console.WriteLine("  --overwrite                   Overwrite existing output files");
+        Console.WriteLine();
+        Console.WriteLine("Options for simulate-group-props:");
+        Console.WriteLine("  --score-matrix-file <path>    wc26-fixture-score-matrix.json or .csv from build-score-matrix");
+        Console.WriteLine("  --output-folder <path>        Output folder. Default: data/score-model");
+        Console.WriteLine("  --iterations <n>              Monte Carlo iterations. Default: 200000");
+        Console.WriteLine("  --seed <n>                    Random seed. Default: 2026");
+        Console.WriteLine("  --overwrite                   Overwrite existing output files");
+        Console.WriteLine();
+        Console.WriteLine("Options for compare-group-props:");
+        Console.WriteLine("  --prop-probabilities-file <path>  wc26-group-prop-simulation.json or wc26-group-special-prop-probabilities.csv");
+        Console.WriteLine("  --prop-odds-file <path>           wc2026_group_special_props_score_modelable_odds.csv");
+        Console.WriteLine("  --output-folder <path>            Output folder. Default: data/score-model");
+        Console.WriteLine("  --edge-threshold <value>          Minimum model probability minus book no-vig probability. Default: 0.08");
+        Console.WriteLine("  --min-odds <value>                Minimum odds for BET flag. Default: 1.60");
+        Console.WriteLine("  --overwrite                       Overwrite existing output files");
         Console.WriteLine();
         Console.WriteLine("Options for validate-models:");
         Console.WriteLine("  --models-folder <path>         Model folder. Alias: --input-folder. Default: data/models");
