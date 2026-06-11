@@ -8,6 +8,11 @@ public sealed class FixtureScoreMatrixSet
     public int ValidFixtureCount { get; init; }
     public int InvalidFixtureCount { get; init; }
     public int MaxGoals { get; init; }
+    public string CalibrationMode { get; init; } = "None";
+    public double P00Multiplier { get; init; } = 1.0d;
+    public double P11Multiplier { get; init; } = 1.0d;
+    public double P10Or01Multiplier { get; init; } = 1.0d;
+    public double P21Or12Multiplier { get; init; } = 1.0d;
     public List<FixtureScoreMatrix> Fixtures { get; init; } = [];
     public List<FixtureScoreMatrixDiagnostic> Diagnostics { get; init; } = [];
     public List<string> ValidationErrors { get; init; } = [];
@@ -26,6 +31,11 @@ public sealed class FixtureScoreMatrix
     public double TeamBXg { get; init; }
     public double TotalLambda { get; init; }
     public double TotalLine { get; init; }
+    public double TargetP1 { get; init; }
+    public double TargetPX { get; init; }
+    public double TargetP2 { get; init; }
+    public double TargetPOver { get; init; }
+    public string CalibrationMode { get; init; } = "None";
     public double GridMass { get; init; }
     public string Status { get; init; } = "valid";
     public string Warning { get; init; } = string.Empty;
@@ -49,6 +59,11 @@ public sealed class FixtureScoreMatrixDiagnostic
     public double TeamBXg { get; init; }
     public double TotalLambda { get; init; }
     public double TotalLine { get; init; }
+    public double TargetP1 { get; init; }
+    public double TargetPX { get; init; }
+    public double TargetP2 { get; init; }
+    public double TargetPOver { get; init; }
+    public string CalibrationMode { get; init; } = "None";
     public double GridMass { get; init; }
     public double ProbabilitySum { get; init; }
     public double P1 { get; init; }
@@ -61,6 +76,7 @@ public sealed class FixtureScoreMatrixDiagnostic
     public double P21Or12 { get; init; }
     public double P22 { get; init; }
     public double P32Or23 { get; init; }
+    public double DrawCalibrationError { get; init; }
     public string Status { get; init; } = "valid";
     public string Warning { get; init; } = string.Empty;
 }

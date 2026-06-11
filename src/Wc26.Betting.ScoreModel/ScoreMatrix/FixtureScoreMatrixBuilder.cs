@@ -14,7 +14,18 @@ public sealed class FixtureScoreMatrixBuilder
         bool overwrite,
         CancellationToken cancellationToken)
     {
-        var set = await BuildFromMarketXgFileAsync(marketXgFile, maxGoals, cancellationToken);
+        return await BuildAndWriteAsync(marketXgFile, outputFolder, maxGoals, ScoreMatrixCalibrationOptions.None, overwrite, cancellationToken);
+    }
+
+    public async Task<FixtureScoreMatrixSet> BuildAndWriteAsync(
+        string marketXgFile,
+        string outputFolder,
+        int maxGoals,
+        ScoreMatrixCalibrationOptions calibrationOptions,
+        bool overwrite,
+        CancellationToken cancellationToken)
+    {
+        var set = await BuildFromMarketXgFileAsync(marketXgFile, maxGoals, calibrationOptions, cancellationToken);
         Directory.CreateDirectory(outputFolder);
 
         await WriteJsonAsync(Path.Combine(outputFolder, "wc26-fixture-score-matrix.json"), set, overwrite, cancellationToken);
@@ -24,7 +35,12 @@ public sealed class FixtureScoreMatrixBuilder
         return set;
     }
 
-    public async Task<FixtureScoreMatrixSet> BuildFromMarketXgFileAsync(string marketXgFile, int maxGoals, CancellationToken cancellationToken)
+    public Task<FixtureScoreMatrixSet> BuildFromMarketXgFileAsync(string marketXgFile, int maxGoals, CancellationToken cancellationToken)
+    {
+        return BuildFromMarketXgFileAsync(marketXgFile, maxGoals, ScoreMatrixCalibrationOptions.None, cancellationToken);
+    }
+
+    public async Task<FixtureScoreMatrixSet> BuildFromMarketXgFileAsync(string marketXgFile, int maxGoals, ScoreMatrixCalibrationOptions calibrationOptions, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(marketXgFile))
             throw new ArgumentException("Market xG file is required.", nameof(marketXgFile));
@@ -35,6 +51,7 @@ public sealed class FixtureScoreMatrixBuilder
         if (maxGoals > 20)
             throw new ArgumentOutOfRangeException(nameof(maxGoals), "Use at most 20 goals.");
 
+        calibrationOptions ??= ScoreMatrixCalibrationOptions.None;
         var xgSet = await ReadMarketXgAsync(marketXgFile, cancellationToken);
         var fixtures = new List<FixtureScoreMatrix>();
         var diagnostics = new List<FixtureScoreMatrixDiagnostic>();
@@ -44,7 +61,7 @@ public sealed class FixtureScoreMatrixBuilder
         {
             try
             {
-                var matrix = BuildFixtureMatrix(fixture, maxGoals);
+                var matrix = BuildFixtureMatrix(fixture, maxGoals, calibrationOptions);
                 fixtures.Add(matrix);
                 diagnostics.Add(BuildDiagnostic(matrix));
             }
@@ -68,6 +85,11 @@ public sealed class FixtureScoreMatrixBuilder
             ValidFixtureCount = fixtures.Count(x => string.Equals(x.Status, "valid", StringComparison.OrdinalIgnoreCase)),
             InvalidFixtureCount = fixtures.Count(x => !string.Equals(x.Status, "valid", StringComparison.OrdinalIgnoreCase)),
             MaxGoals = maxGoals,
+            CalibrationMode = calibrationOptions.Mode.ToString(),
+            P00Multiplier = calibrationOptions.UsesLowScoreBoost ? calibrationOptions.P00Multiplier : 1.0d,
+            P11Multiplier = calibrationOptions.UsesLowScoreBoost ? calibrationOptions.P11Multiplier : 1.0d,
+            P10Or01Multiplier = calibrationOptions.UsesLowScoreBoost ? calibrationOptions.P10Or01Multiplier : 1.0d,
+            P21Or12Multiplier = calibrationOptions.UsesLowScoreBoost ? calibrationOptions.P21Or12Multiplier : 1.0d,
             Fixtures = fixtures,
             Diagnostics = diagnostics,
             Warnings = warnings,
@@ -75,7 +97,7 @@ public sealed class FixtureScoreMatrixBuilder
         };
     }
 
-    private static FixtureScoreMatrix BuildFixtureMatrix(MarketImpliedXgFixture fixture, int maxGoals)
+    private static FixtureScoreMatrix BuildFixtureMatrix(MarketImpliedXgFixture fixture, int maxGoals, ScoreMatrixCalibrationOptions calibrationOptions)
     {
         if (!string.Equals(fixture.Status, "valid", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException($"Source xG fixture is invalid: {fixture.Warning}");
@@ -117,6 +139,8 @@ public sealed class FixtureScoreMatrixBuilder
             })
             .ToList();
 
+        normalizedScores = ApplyCalibration(normalizedScores, fixture, calibrationOptions);
+
         return new FixtureScoreMatrix
         {
             MatchKey = fixture.MatchKey,
@@ -129,10 +153,103 @@ public sealed class FixtureScoreMatrixBuilder
             TeamBXg = fixture.TeamBXg,
             TotalLambda = fixture.TotalLambda,
             TotalLine = fixture.TotalLine,
+            TargetP1 = fixture.NoVigP1,
+            TargetPX = fixture.NoVigPX,
+            TargetP2 = fixture.NoVigP2,
+            TargetPOver = fixture.NoVigPOver,
+            CalibrationMode = calibrationOptions.Mode.ToString(),
             GridMass = rawMass,
             Status = "valid",
             Scores = normalizedScores
         };
+    }
+
+    private static List<FixtureScoreProbability> ApplyCalibration(
+        List<FixtureScoreProbability> scores,
+        MarketImpliedXgFixture fixture,
+        ScoreMatrixCalibrationOptions options)
+    {
+        var adjusted = scores;
+
+        if (options.UsesLowScoreBoost)
+            adjusted = ApplyLowScoreBoost(adjusted, options);
+
+        if (options.UsesDrawMatch)
+            adjusted = ApplyDrawMatch(adjusted, fixture.NoVigPX);
+
+        return adjusted;
+    }
+
+    private static List<FixtureScoreProbability> ApplyLowScoreBoost(
+        IReadOnlyList<FixtureScoreProbability> scores,
+        ScoreMatrixCalibrationOptions options)
+    {
+        var adjusted = scores
+            .Select(score => new FixtureScoreProbability
+            {
+                ScoreA = score.ScoreA,
+                ScoreB = score.ScoreB,
+                RawProbability = score.RawProbability,
+                Probability = score.Probability * GetLowScoreMultiplier(score, options)
+            })
+            .ToList();
+
+        return Renormalize(adjusted);
+    }
+
+    private static double GetLowScoreMultiplier(FixtureScoreProbability score, ScoreMatrixCalibrationOptions options)
+    {
+        if (score.ScoreA == 0 && score.ScoreB == 0)
+            return options.P00Multiplier;
+        if (score.ScoreA == 1 && score.ScoreB == 1)
+            return options.P11Multiplier;
+        if ((score.ScoreA == 1 && score.ScoreB == 0) || (score.ScoreA == 0 && score.ScoreB == 1))
+            return options.P10Or01Multiplier;
+        if ((score.ScoreA == 2 && score.ScoreB == 1) || (score.ScoreA == 1 && score.ScoreB == 2))
+            return options.P21Or12Multiplier;
+        return 1.0d;
+    }
+
+    private static List<FixtureScoreProbability> ApplyDrawMatch(IReadOnlyList<FixtureScoreProbability> scores, double targetDrawProbability)
+    {
+        if (targetDrawProbability <= 0.0d || targetDrawProbability >= 1.0d)
+            return scores.ToList();
+
+        var currentDraw = scores.Where(x => x.ScoreA == x.ScoreB).Sum(x => x.Probability);
+        if (currentDraw <= 0.0d || currentDraw >= 1.0d)
+            return scores.ToList();
+
+        var drawFactor = targetDrawProbability / currentDraw;
+        var nonDrawFactor = (1.0d - targetDrawProbability) / (1.0d - currentDraw);
+
+        var adjusted = scores
+            .Select(score => new FixtureScoreProbability
+            {
+                ScoreA = score.ScoreA,
+                ScoreB = score.ScoreB,
+                RawProbability = score.RawProbability,
+                Probability = score.Probability * (score.ScoreA == score.ScoreB ? drawFactor : nonDrawFactor)
+            })
+            .ToList();
+
+        return Renormalize(adjusted);
+    }
+
+    private static List<FixtureScoreProbability> Renormalize(IReadOnlyList<FixtureScoreProbability> scores)
+    {
+        var mass = scores.Sum(x => x.Probability);
+        if (mass <= 0.0d)
+            throw new InvalidOperationException("Calibrated score matrix probability mass is zero.");
+
+        return scores
+            .Select(score => new FixtureScoreProbability
+            {
+                ScoreA = score.ScoreA,
+                ScoreB = score.ScoreB,
+                RawProbability = score.RawProbability,
+                Probability = score.Probability / mass
+            })
+            .ToList();
     }
 
     private static FixtureScoreMatrix BuildInvalidFixtureMatrix(MarketImpliedXgFixture fixture, string warning)
@@ -149,6 +266,10 @@ public sealed class FixtureScoreMatrixBuilder
             TeamBXg = fixture.TeamBXg,
             TotalLambda = fixture.TotalLambda,
             TotalLine = fixture.TotalLine,
+            TargetP1 = fixture.NoVigP1,
+            TargetPX = fixture.NoVigPX,
+            TargetP2 = fixture.NoVigP2,
+            TargetPOver = fixture.NoVigPOver,
             Status = "invalid",
             Warning = warning
         };
@@ -176,6 +297,11 @@ public sealed class FixtureScoreMatrixBuilder
             TeamBXg = matrix.TeamBXg,
             TotalLambda = matrix.TotalLambda,
             TotalLine = matrix.TotalLine,
+            TargetP1 = matrix.TargetP1,
+            TargetPX = matrix.TargetPX,
+            TargetP2 = matrix.TargetP2,
+            TargetPOver = matrix.TargetPOver,
+            CalibrationMode = matrix.CalibrationMode,
             GridMass = matrix.GridMass,
             ProbabilitySum = sum,
             P1 = p1,
@@ -188,6 +314,7 @@ public sealed class FixtureScoreMatrixBuilder
             P21Or12 = p21Or12,
             P22 = p22,
             P32Or23 = p32Or23,
+            DrawCalibrationError = matrix.TargetPX > 0 ? px - matrix.TargetPX : 0.0d,
             Status = matrix.Status,
             Warning = matrix.Warning
         };
@@ -265,6 +392,10 @@ public sealed class FixtureScoreMatrixBuilder
                 TeamBXg = GetDouble(cells, headerByName, "TeamBXg"),
                 TotalLambda = GetDouble(cells, headerByName, "TotalLambda"),
                 TotalLine = GetDouble(cells, headerByName, "TotalLine"),
+                NoVigP1 = GetDouble(cells, headerByName, "NoVigP1", 0.0d),
+                NoVigPX = GetDouble(cells, headerByName, "NoVigPX", 0.0d),
+                NoVigP2 = GetDouble(cells, headerByName, "NoVigP2", 0.0d),
+                NoVigPOver = GetDouble(cells, headerByName, "NoVigPOver", 0.0d),
                 Status = Get(cells, headerByName, "Status", "valid"),
                 Warning = Get(cells, headerByName, "Warning")
             });
@@ -300,7 +431,7 @@ public sealed class FixtureScoreMatrixBuilder
     {
         EnsureCanWrite(path, overwrite);
         await using var writer = new StreamWriter(path);
-        await writer.WriteLineAsync("Group,MatchDate,MatchTime,TeamA,TeamB,TeamAXg,TeamBXg,TotalLambda,TotalLine,GridMass,ScoreA,ScoreB,RawProbability,Probability,Status,Warning");
+        await writer.WriteLineAsync("Group,MatchDate,MatchTime,TeamA,TeamB,TeamAXg,TeamBXg,TotalLambda,TotalLine,TargetP1,TargetPX,TargetP2,TargetPOver,CalibrationMode,GridMass,ScoreA,ScoreB,RawProbability,Probability,Status,Warning");
 
         foreach (var fixture in set.Fixtures)
         {
@@ -309,7 +440,8 @@ public sealed class FixtureScoreMatrixBuilder
                 await writer.WriteLineAsync(string.Join(',', new[]
                 {
                     Csv(fixture.GroupCode), Csv(fixture.MatchDate), Csv(fixture.MatchTime), Csv(fixture.TeamA), Csv(fixture.TeamB),
-                    D(fixture.TeamAXg), D(fixture.TeamBXg), D(fixture.TotalLambda), D(fixture.TotalLine), D(fixture.GridMass),
+                    D(fixture.TeamAXg), D(fixture.TeamBXg), D(fixture.TotalLambda), D(fixture.TotalLine),
+                    D(fixture.TargetP1), D(fixture.TargetPX), D(fixture.TargetP2), D(fixture.TargetPOver), Csv(fixture.CalibrationMode), D(fixture.GridMass),
                     score.ScoreA.ToString(CultureInfo.InvariantCulture), score.ScoreB.ToString(CultureInfo.InvariantCulture),
                     D(score.RawProbability), D(score.Probability), Csv(fixture.Status), Csv(fixture.Warning)
                 }));
@@ -321,16 +453,17 @@ public sealed class FixtureScoreMatrixBuilder
     {
         EnsureCanWrite(path, overwrite);
         await using var writer = new StreamWriter(path);
-        await writer.WriteLineAsync("Group,TeamA,TeamB,TeamAXg,TeamBXg,TotalLambda,TotalLine,GridMass,ProbabilitySum,P1,PX,P2,POver,PUnder,P00,P10Or01,P21Or12,P22,P32Or23,Status,Warning");
+        await writer.WriteLineAsync("Group,TeamA,TeamB,TeamAXg,TeamBXg,TotalLambda,TotalLine,TargetP1,TargetPX,TargetP2,TargetPOver,CalibrationMode,GridMass,ProbabilitySum,P1,PX,P2,POver,PUnder,P00,P10Or01,P21Or12,P22,P32Or23,DrawCalibrationError,Status,Warning");
 
         foreach (var d in set.Diagnostics.OrderBy(x => x.GroupCode).ThenBy(x => x.TeamA).ThenBy(x => x.TeamB))
         {
             await writer.WriteLineAsync(string.Join(',', new[]
             {
                 Csv(d.GroupCode), Csv(d.TeamA), Csv(d.TeamB),
-                D(d.TeamAXg), D(d.TeamBXg), D(d.TotalLambda), D(d.TotalLine), D(d.GridMass), D(d.ProbabilitySum),
+                D(d.TeamAXg), D(d.TeamBXg), D(d.TotalLambda), D(d.TotalLine),
+                D(d.TargetP1), D(d.TargetPX), D(d.TargetP2), D(d.TargetPOver), Csv(d.CalibrationMode), D(d.GridMass), D(d.ProbabilitySum),
                 D(d.P1), D(d.PX), D(d.P2), D(d.POver), D(d.PUnder),
-                D(d.P00), D(d.P10Or01), D(d.P21Or12), D(d.P22), D(d.P32Or23), Csv(d.Status), Csv(d.Warning)
+                D(d.P00), D(d.P10Or01), D(d.P21Or12), D(d.P22), D(d.P32Or23), D(d.DrawCalibrationError), Csv(d.Status), Csv(d.Warning)
             }));
         }
     }
@@ -355,6 +488,19 @@ public sealed class FixtureScoreMatrixBuilder
         return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
             ? parsed
             : throw new InvalidOperationException($"CSV column '{name}' has invalid numeric value '{value}'.");
+    }
+
+    private static double GetDouble(IReadOnlyList<string> cells, IReadOnlyDictionary<string, int> headerByName, string name, double defaultValue)
+    {
+        if (!headerByName.ContainsKey(name))
+            return defaultValue;
+        var value = Get(cells, headerByName, name);
+        if (string.IsNullOrWhiteSpace(value))
+            return defaultValue;
+        value = value.Replace(',', '.');
+        return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : defaultValue;
     }
 
     private static string Csv(string? value) => SimpleCsv.Escape(value ?? string.Empty);

@@ -16,7 +16,21 @@ public sealed class GroupPropMarketComparer
         bool overwrite,
         CancellationToken cancellationToken)
     {
-        var set = await CompareAsync(propProbabilitiesFile, propOddsFile, edgeThreshold, minOdds, cancellationToken);
+        var set = await CompareAndWriteAsync(propProbabilitiesFile, propOddsFile, outputFolder, edgeThreshold, minOdds, statPropsOnly: false, overwrite, cancellationToken);
+        return set;
+    }
+
+    public async Task<GroupPropMarketComparisonSet> CompareAndWriteAsync(
+        string propProbabilitiesFile,
+        string propOddsFile,
+        string outputFolder,
+        double edgeThreshold,
+        double minOdds,
+        bool statPropsOnly,
+        bool overwrite,
+        CancellationToken cancellationToken)
+    {
+        var set = await CompareAsync(propProbabilitiesFile, propOddsFile, edgeThreshold, minOdds, statPropsOnly, cancellationToken);
         Directory.CreateDirectory(outputFolder);
 
         await WriteJsonAsync(Path.Combine(outputFolder, "wc26-group-special-props-comparison.json"), set, overwrite, cancellationToken);
@@ -34,6 +48,17 @@ public sealed class GroupPropMarketComparer
         double minOdds,
         CancellationToken cancellationToken)
     {
+        return await CompareAsync(propProbabilitiesFile, propOddsFile, edgeThreshold, minOdds, statPropsOnly: false, cancellationToken);
+    }
+
+    public async Task<GroupPropMarketComparisonSet> CompareAsync(
+        string propProbabilitiesFile,
+        string propOddsFile,
+        double edgeThreshold,
+        double minOdds,
+        bool statPropsOnly,
+        CancellationToken cancellationToken)
+    {
         var modelRows = await ReadModelProbabilitiesAsync(propProbabilitiesFile, cancellationToken);
         var oddsRows = await ReadOddsRowsAsync(propOddsFile, cancellationToken);
 
@@ -47,6 +72,9 @@ public sealed class GroupPropMarketComparer
 
         foreach (var odds in oddsRows.OrderBy(x => x.GroupCode).ThenBy(x => x.MarketOrder))
         {
+            if (statPropsOnly && !IsScoreStatMarketType(odds.MarketType))
+                continue;
+
             var mapped = MapMarketType(odds.MarketType);
             if (mapped is null)
             {
@@ -125,6 +153,22 @@ public sealed class GroupPropMarketComparer
                 Decision = decision
             });
         }
+    }
+
+    public static bool IsScoreStatMarketType(string bookMarketType)
+    {
+        return bookMarketType.Trim() switch
+        {
+            "TeamsScoredZeroGoals" => true,
+            "TeamsConcededZeroGoals" => true,
+            "Draws" => true,
+            "Score00" => true,
+            "Score22" => true,
+            "Score10Or01" => true,
+            "Score21Or12" => true,
+            "Score32Or23" => true,
+            _ => false
+        };
     }
 
     private static MappedMarket? MapMarketType(string bookMarketType)

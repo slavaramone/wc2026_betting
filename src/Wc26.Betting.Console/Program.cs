@@ -11,6 +11,7 @@ using Wc26.Betting.ScoreModel.MarketXg;
 using Wc26.Betting.ScoreModel.ScoreMatrix;
 using Wc26.Betting.ScoreModel.GroupSimulation;
 using Wc26.Betting.ScoreModel.GroupPropComparison;
+using Wc26.Betting.ScoreModel.Sensitivity;
 
 var exitCode = await CliApplication.RunAsync(args, CancellationToken.None);
 return exitCode;
@@ -69,6 +70,7 @@ internal static class CliApplication
                 "build-score-matrix" => await RunBuildScoreMatrixAsync(options, cancellationToken),
                 "simulate-group-props" => await RunSimulateGroupPropsAsync(options, cancellationToken),
                 "compare-group-props" => await RunCompareGroupPropsAsync(options, cancellationToken),
+                "group-props-sensitivity" => await RunGroupPropsSensitivityAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
         }
@@ -300,10 +302,19 @@ internal static class CliApplication
         var outputFolder = options.GetAny(["output-folder", "score-model-folder"], Path.Combine("data", "score-model"));
         var maxGoals = options.GetInt("max-goals", 10);
         var overwrite = options.GetBool("overwrite", false);
+        var calibrationMode = ScoreMatrixCalibrationOptions.ParseMode(options.Get("calibration-mode", "None"));
+        var calibrationOptions = new ScoreMatrixCalibrationOptions
+        {
+            Mode = calibrationMode,
+            P00Multiplier = options.GetDouble("p00-multiplier", 1.10d),
+            P11Multiplier = options.GetDouble("p11-multiplier", 1.08d),
+            P10Or01Multiplier = options.GetDouble("p10-or-01-multiplier", 1.03d),
+            P21Or12Multiplier = options.GetDouble("p21-or-12-multiplier", 0.98d)
+        };
 
         Console.WriteLine("Building WC2026 fixture score matrix...");
         var builder = new FixtureScoreMatrixBuilder();
-        var result = await builder.BuildAndWriteAsync(marketXgFile, outputFolder, maxGoals, overwrite, cancellationToken);
+        var result = await builder.BuildAndWriteAsync(marketXgFile, outputFolder, maxGoals, calibrationOptions, overwrite, cancellationToken);
 
         Console.WriteLine("FIXTURE SCORE MATRIX RESULT");
         Console.WriteLine($"Source xG: {result.SourceMarketXgFile}");
@@ -312,6 +323,7 @@ internal static class CliApplication
         Console.WriteLine($"Invalid fixtures: {result.InvalidFixtureCount}");
         Console.WriteLine($"Validation errors: {result.ValidationErrors.Count}");
         Console.WriteLine($"Max goals grid: {result.MaxGoals}");
+        Console.WriteLine($"Calibration mode: {result.CalibrationMode}");
         Console.WriteLine($"Output: {outputFolder}");
 
         if (result.Diagnostics.Count > 0)
@@ -412,10 +424,11 @@ internal static class CliApplication
         var edgeThreshold = options.GetDouble("edge-threshold", 0.08d);
         var minOdds = options.GetDouble("min-odds", 1.60d);
         var overwrite = options.GetBool("overwrite", false);
+        var statPropsOnly = options.GetBool("stat-props-only", false);
 
         Console.WriteLine("Comparing WC2026 group prop probabilities with book odds...");
         var comparer = new GroupPropMarketComparer();
-        var result = await comparer.CompareAndWriteAsync(propProbabilitiesFile, propOddsFile, outputFolder, edgeThreshold, minOdds, overwrite, cancellationToken);
+        var result = await comparer.CompareAndWriteAsync(propProbabilitiesFile, propOddsFile, outputFolder, edgeThreshold, minOdds, statPropsOnly, overwrite, cancellationToken);
 
         var betRowCount = result.Rows.Count(x => string.Equals(x.Decision, "BET", StringComparison.OrdinalIgnoreCase));
 
@@ -1108,6 +1121,66 @@ internal static class CliApplication
         return result;
     }
 
+    private static async Task<int> RunGroupPropsSensitivityAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var marketXgFile = options.GetAny(["market-xg-file", "fixture-xg-file", "input-file"], string.Empty);
+        if (string.IsNullOrWhiteSpace(marketXgFile))
+            throw new ArgumentException("--market-xg-file is required. Use wc26-fixture-market-xg.json from build-market-xg.");
+
+        var propOddsFile = options.GetAny(["prop-odds-file", "odds-file"], string.Empty);
+        if (string.IsNullOrWhiteSpace(propOddsFile))
+            throw new ArgumentException("--prop-odds-file is required. Use wc2026_group_special_props_score_modelable_odds.csv.");
+
+        var outputFolder = options.GetAny(["output-folder", "score-model-folder"], Path.Combine("data", "score-model"));
+        var maxGoals = options.GetInt("max-goals", 10);
+        var iterations = options.GetInt("iterations", 200000);
+        var seed = options.GetInt("seed", 2026);
+        var edgeThreshold = options.GetDouble("edge-threshold", 0.08d);
+        var minOdds = options.GetDouble("min-odds", 1.60d);
+        var statPropsOnly = options.GetBool("stat-props-only", true);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Running WC2026 group props sensitivity report...");
+        var runner = new GroupPropSensitivityRunner();
+        var result = await runner.RunAndWriteAsync(
+            marketXgFile,
+            propOddsFile,
+            outputFolder,
+            maxGoals,
+            iterations,
+            seed,
+            edgeThreshold,
+            minOdds,
+            statPropsOnly,
+            overwrite,
+            cancellationToken);
+
+        Console.WriteLine("GROUP PROPS SENSITIVITY RESULT");
+        Console.WriteLine($"Source xG: {result.SourceMarketXgFile}");
+        Console.WriteLine($"Source odds: {result.SourcePropOddsFile}");
+        Console.WriteLine($"Iterations: {result.Iterations}");
+        Console.WriteLine($"Seed: {result.Seed}");
+        Console.WriteLine($"Scenarios: {result.ScenarioCount}");
+        Console.WriteLine($"Rows: {result.Rows.Count}");
+        Console.WriteLine($"Stable bets: {result.Rows.Count(x => string.Equals(x.StabilityDecision, "STABLE_BET", StringComparison.OrdinalIgnoreCase))}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        Console.WriteLine();
+        Console.WriteLine("Scenario summaries:");
+        foreach (var scenario in result.Scenarios)
+            Console.WriteLine($"  {scenario.Scenario}: compared {scenario.ComparedRows}, bets {scenario.BetRows}, max ROI {scenario.MaxRoiAtBookOdds:0.0%}");
+
+        if (result.Warnings.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Warnings:");
+            foreach (var warning in result.Warnings.Take(30))
+                Console.WriteLine($"  {warning}");
+        }
+
+        return result.Warnings.Count == 0 ? 0 : 0;
+    }
+
     private static int UnknownCommand(string command)
     {
         Console.Error.WriteLine($"Unknown command: {command}");
@@ -1146,6 +1219,7 @@ internal static class CliApplication
         Console.WriteLine("  build-score-matrix  Build fixture score matrix from market-implied xG");
         Console.WriteLine("  simulate-group-props  Simulate group special props from fixture score matrix");
         Console.WriteLine("  compare-group-props  Compare group special prop probabilities with book odds");
+        Console.WriteLine("  group-props-sensitivity  Run Base/DrawMatch/LowScoreBoost sensitivity for group props");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore");
@@ -1164,9 +1238,10 @@ internal static class CliApplication
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- best-confederation-team-stability-report --models-folder C:\Temp\wc26\models --best-confederation-odds-file data\raw\odds\wc2026_best_confederation_team_market_odds.csv --output-folder C:\Temp\wc26\reports\best-confederation-team-stability --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- market-power-stage-exit-review --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\market-power-stage-exit --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-market-xg --match-odds-file data\raw\odds\wc2026_group_stage_fresh_odds_1x2_handicap_totals.csv --output-folder C:\Temp\wc26\score-model --overwrite");
-        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-score-matrix --market-xg-file C:\Temp\wc26\score-model\wc26-fixture-market-xg.json --output-folder C:\Temp\wc26\score-model --max-goals 10 --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-score-matrix --market-xg-file C:\Temp\wc26\score-model\wc26-fixture-market-xg.json --output-folder C:\Temp\wc26\score-model --max-goals 10 --calibration-mode DrawMatch --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- simulate-group-props --score-matrix-file C:\Temp\wc26\score-model\wc26-fixture-score-matrix.json --output-folder C:\Temp\wc26\score-model --iterations 200000 --seed 2026 --overwrite");
-        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- compare-group-props --prop-probabilities-file C:\Temp\wc26\score-model\wc26-group-prop-simulation.json --prop-odds-file data\raw\odds\wc2026_group_special_props_score_modelable_odds.csv --output-folder C:\Temp\wc26\score-model --edge-threshold 0.08 --min-odds 1.60 --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- compare-group-props --prop-probabilities-file C:\Temp\wc26\score-model\wc26-group-prop-simulation.json --prop-odds-file data\raw\odds\wc2026_group_special_props_score_modelable_odds.csv --output-folder C:\Temp\wc26\score-model --edge-threshold 0.08 --min-odds 1.60 --stat-props-only --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- group-props-sensitivity --market-xg-file C:\Temp\wc26\score-model\wc26-fixture-market-xg.json --prop-odds-file data\raw\odds\wc2026_group_special_props_score_modelable_odds.csv --output-folder C:\Temp\wc26\score-model --iterations 200000 --seed 2026 --overwrite");
         Console.WriteLine();
         Console.WriteLine("Options for grab-sofascore:");
         Console.WriteLine("  --destination-folder <path>   Output directory. Alias: --output. Default: data/raw/sofascore");
