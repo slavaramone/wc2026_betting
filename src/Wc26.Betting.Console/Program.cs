@@ -8,6 +8,7 @@ using Wc26.Betting.Core.Simulation;
 using Wc26.Betting.Core.TeamRatings;
 using Wc26.Betting.Core.Validation;
 using Wc26.Betting.ScoreModel.MarketXg;
+using Wc26.Betting.ScoreModel.ScoreMatrix;
 
 var exitCode = await CliApplication.RunAsync(args, CancellationToken.None);
 return exitCode;
@@ -63,6 +64,7 @@ internal static class CliApplication
                 "finalist-pair-stability-report" => await RunFinalistPairStabilityReportAsync(options, cancellationToken),
                 "market-power-stage-exit-review" => await RunMarketPowerStageExitReviewAsync(options, cancellationToken),
                 "build-market-xg" => await RunBuildMarketXgAsync(options, cancellationToken),
+                "build-score-matrix" => await RunBuildScoreMatrixAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
         }
@@ -279,6 +281,59 @@ internal static class CliApplication
         {
             var error = Math.Abs(fixture.ErrorP1) + Math.Abs(fixture.ErrorPX) + Math.Abs(fixture.ErrorP2);
             Console.WriteLine($"  {fixture.TeamA} - {fixture.TeamB}: abs error {error:P1}; market {fixture.NoVigP1:P1}/{fixture.NoVigPX:P1}/{fixture.NoVigP2:P1}; model {fixture.ModelP1:P1}/{fixture.ModelPX:P1}/{fixture.ModelP2:P1}");
+        }
+
+        return result.InvalidFixtureCount == 0 && result.ValidationErrors.Count == 0 ? 0 : 1;
+    }
+
+
+    private static async Task<int> RunBuildScoreMatrixAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var marketXgFile = options.GetAny(["market-xg-file", "fixture-xg-file", "input-file"], string.Empty);
+        if (string.IsNullOrWhiteSpace(marketXgFile))
+            throw new ArgumentException("--market-xg-file is required. Use wc26-fixture-market-xg.json or wc26-fixture-market-xg.csv from build-market-xg.");
+
+        var outputFolder = options.GetAny(["output-folder", "score-model-folder"], Path.Combine("data", "score-model"));
+        var maxGoals = options.GetInt("max-goals", 10);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Building WC2026 fixture score matrix...");
+        var builder = new FixtureScoreMatrixBuilder();
+        var result = await builder.BuildAndWriteAsync(marketXgFile, outputFolder, maxGoals, overwrite, cancellationToken);
+
+        Console.WriteLine("FIXTURE SCORE MATRIX RESULT");
+        Console.WriteLine($"Source xG: {result.SourceMarketXgFile}");
+        Console.WriteLine($"Fixtures: {result.FixtureCount}");
+        Console.WriteLine($"Valid fixtures: {result.ValidFixtureCount}");
+        Console.WriteLine($"Invalid fixtures: {result.InvalidFixtureCount}");
+        Console.WriteLine($"Validation errors: {result.ValidationErrors.Count}");
+        Console.WriteLine($"Max goals grid: {result.MaxGoals}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        if (result.Diagnostics.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Score matrix sanity:");
+            Console.WriteLine($"  Avg grid mass: {result.Diagnostics.Average(x => x.GridMass):0.000000}");
+            Console.WriteLine($"  Min grid mass: {result.Diagnostics.Min(x => x.GridMass):0.000000}");
+            Console.WriteLine($"  Max P(0-0): {result.Diagnostics.Max(x => x.P00):0.0000}");
+            Console.WriteLine($"  Avg draw probability: {result.Diagnostics.Average(x => x.PX):0.0000}");
+        }
+
+        if (result.ValidationErrors.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Validation errors:");
+            foreach (var error in result.ValidationErrors.Take(30))
+                Console.WriteLine($"  {error}");
+        }
+
+        if (result.Warnings.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Warnings:");
+            foreach (var warning in result.Warnings.Take(30))
+                Console.WriteLine($"  {warning}");
         }
 
         return result.InvalidFixtureCount == 0 && result.ValidationErrors.Count == 0 ? 0 : 1;
@@ -1101,6 +1156,18 @@ internal static class CliApplication
         Console.WriteLine("  --output-folder <path>              Report output folder. Default: <models-folder>/reports");
         Console.WriteLine("  --min-edge <probability>            BET threshold as probability edge. Default: 0.03");
         Console.WriteLine("  --overwrite                         Overwrite existing comparison files");
+        Console.WriteLine();
+        Console.WriteLine("Options for build-market-xg:");
+        Console.WriteLine("  --match-odds-file <path>      Parsed WC2026 1X2 + total odds CSV");
+        Console.WriteLine("  --output-folder <path>        Output folder. Default: data/score-model");
+        Console.WriteLine("  --max-goals <n>               Internal xG fitting grid. Default: 12");
+        Console.WriteLine("  --overwrite                   Overwrite existing output files");
+        Console.WriteLine();
+        Console.WriteLine("Options for build-score-matrix:");
+        Console.WriteLine("  --market-xg-file <path>       wc26-fixture-market-xg.json or .csv from build-market-xg");
+        Console.WriteLine("  --output-folder <path>        Output folder. Default: data/score-model");
+        Console.WriteLine("  --max-goals <n>               Score grid 0..n. Default: 10");
+        Console.WriteLine("  --overwrite                   Overwrite existing output files");
         Console.WriteLine();
         Console.WriteLine("Options for validate-models:");
         Console.WriteLine("  --models-folder <path>         Model folder. Alias: --input-folder. Default: data/models");
