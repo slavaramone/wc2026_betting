@@ -7,6 +7,7 @@ using Wc26.Betting.Core.Sofascore;
 using Wc26.Betting.Core.Simulation;
 using Wc26.Betting.Core.TeamRatings;
 using Wc26.Betting.Core.Validation;
+using Wc26.Betting.ScoreModel.MarketXg;
 
 var exitCode = await CliApplication.RunAsync(args, CancellationToken.None);
 return exitCode;
@@ -61,6 +62,7 @@ internal static class CliApplication
                 "winner-confederation-stability-report" => await RunWinnerConfederationStabilityReportAsync(options, cancellationToken),
                 "finalist-pair-stability-report" => await RunFinalistPairStabilityReportAsync(options, cancellationToken),
                 "market-power-stage-exit-review" => await RunMarketPowerStageExitReviewAsync(options, cancellationToken),
+                "build-market-xg" => await RunBuildMarketXgAsync(options, cancellationToken),
                 _ => UnknownCommand(command)
             };
         }
@@ -208,6 +210,58 @@ internal static class CliApplication
         }
 
         return 0;
+    }
+
+
+    private static async Task<int> RunBuildMarketXgAsync(CliOptions options, CancellationToken cancellationToken)
+    {
+        var oddsFile = options.GetAny(["match-odds-file", "game-odds-file", "odds-file"], string.Empty);
+        if (string.IsNullOrWhiteSpace(oddsFile))
+            throw new ArgumentException("--match-odds-file is required. Use the parsed 1X2 + total odds CSV.");
+
+        var outputFolder = options.GetAny(["output-folder", "score-model-folder"], Path.Combine("data", "score-model"));
+        var maxGoals = options.GetInt("max-goals", 12);
+        var overwrite = options.GetBool("overwrite", false);
+
+        Console.WriteLine("Building WC2026 market-implied fixture xG...");
+        var builder = new MarketImpliedXgBuilder();
+        var result = await builder.BuildAndWriteAsync(oddsFile, outputFolder, maxGoals, overwrite, cancellationToken);
+
+        Console.WriteLine("MARKET-IMPLIED XG RESULT");
+        Console.WriteLine($"Source odds: {result.SourceOddsFile}");
+        Console.WriteLine($"Rows: {result.RowCount}");
+        Console.WriteLine($"Valid fixtures: {result.ValidFixtureCount}");
+        Console.WriteLine($"Invalid fixtures: {result.InvalidFixtureCount}");
+        Console.WriteLine($"Max goals grid: {result.MaxGoalsUsed}");
+        Console.WriteLine($"Output: {outputFolder}");
+
+        if (result.Warnings.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Warnings:");
+            foreach (var warning in result.Warnings.Take(20))
+                Console.WriteLine($"  {warning}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("Sample fixture xG:");
+        foreach (var fixture in result.Fixtures.Where(x => x.Status == "valid").Take(12))
+        {
+            Console.WriteLine($"  {fixture.GroupCode} | {fixture.TeamA} - {fixture.TeamB}: xG {fixture.TeamAXg:0.00}-{fixture.TeamBXg:0.00}, total {fixture.TotalLambda:0.00}; 1X2 model {fixture.ModelP1:P1}/{fixture.ModelPX:P1}/{fixture.ModelP2:P1}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("Largest 1X2 fitting errors:");
+        foreach (var fixture in result.Fixtures
+                     .Where(x => x.Status == "valid")
+                     .OrderByDescending(x => Math.Abs(x.ErrorP1) + Math.Abs(x.ErrorPX) + Math.Abs(x.ErrorP2))
+                     .Take(10))
+        {
+            var error = Math.Abs(fixture.ErrorP1) + Math.Abs(fixture.ErrorPX) + Math.Abs(fixture.ErrorP2);
+            Console.WriteLine($"  {fixture.TeamA} - {fixture.TeamB}: abs error {error:P1}; market {fixture.NoVigP1:P1}/{fixture.NoVigPX:P1}/{fixture.NoVigP2:P1}; model {fixture.ModelP1:P1}/{fixture.ModelPX:P1}/{fixture.ModelP2:P1}");
+        }
+
+        return result.InvalidFixtureCount == 0 ? 0 : 1;
     }
 
 
@@ -895,6 +949,7 @@ internal static class CliApplication
         Console.WriteLine("  winner-confederation-stability-report  Run several simulation blends and report stable champion-from-confederation edges");
         Console.WriteLine("  finalist-pair-stability-report  Run several simulation blends and report stable finalist-pair edges");
         Console.WriteLine("  market-power-stage-exit-review  Stress-test stage-exit predictions with market-implied team power");
+        Console.WriteLine("  build-market-xg  Build market-implied fixture xG from 1X2 + total odds");
         Console.WriteLine();
         Console.WriteLine("Examples:");
         Console.WriteLine("  dotnet run --project src/Wc26.Betting.Console -- grab-sofascore");
@@ -912,6 +967,7 @@ internal static class CliApplication
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- compare-best-confederation-team-markets --models-folder C:\Temp\wc26\models --best-confederation-odds-file data\raw\odds\wc2026_best_confederation_team_market_odds.csv --output-folder C:\Temp\wc26\reports --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- best-confederation-team-stability-report --models-folder C:\Temp\wc26\models --best-confederation-odds-file data\raw\odds\wc2026_best_confederation_team_market_odds.csv --output-folder C:\Temp\wc26\reports\best-confederation-team-stability --overwrite");
         Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- market-power-stage-exit-review --models-folder C:\Temp\wc26\models --stage-exit-odds-file data\raw\odds\wc2026_stage_exit_market_odds_2026-05-26.csv --output-folder C:\Temp\wc26\reports\market-power-stage-exit --overwrite");
+        Console.WriteLine(@"  dotnet run --project src/Wc26.Betting.Console -- build-market-xg --match-odds-file data\raw\odds\wc2026_group_stage_fresh_odds_1x2_handicap_totals.csv --output-folder C:\Temp\wc26\score-model --overwrite");
         Console.WriteLine();
         Console.WriteLine("Options for grab-sofascore:");
         Console.WriteLine("  --destination-folder <path>   Output directory. Alias: --output. Default: data/raw/sofascore");

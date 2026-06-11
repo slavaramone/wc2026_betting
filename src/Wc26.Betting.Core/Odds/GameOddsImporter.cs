@@ -34,20 +34,38 @@ public sealed class GameOddsImporter
 
             rowCount++;
             var values = SimpleCsv.ParseLine(line);
-            var homeRaw = Get(values, headers, "home_team");
-            var awayRaw = Get(values, headers, "away_team");
-            var home = RussianToEnglishNationName(homeRaw);
-            var away = RussianToEnglishNationName(awayRaw);
+
+            // Supports both the canonical game-odds CSV written by this project and the urgent screenshot-parsed CSV:
+            // match_no,date_time_screen,team1_ru,team2_ru,team1_en,team2_en,odds_1,...,handicap_1_line,...
+            var homeRaw = GetAny(values, headers, "home_team_raw", "home_team", "team1_ru", "team1_en");
+            var awayRaw = GetAny(values, headers, "away_team_raw", "away_team", "team2_ru", "team2_en");
+            var home = GetAny(values, headers, "home_team", "team1_en");
+            var away = GetAny(values, headers, "away_team", "team2_en");
+            if (string.IsNullOrWhiteSpace(home))
+                home = RussianToEnglishNationName(homeRaw);
+            if (string.IsNullOrWhiteSpace(away))
+                away = RussianToEnglishNationName(awayRaw);
+
             var normalizedHome = NormalizeTeamName(home);
             var normalizedAway = NormalizeTeamName(away);
+            var matchDate = GetAny(values, headers, "match_date", "date");
+            var matchTime = GetAny(values, headers, "match_time", "time");
+            var screenDateTime = GetAny(values, headers, "date_time_screen", "datetime", "date_time");
+            if (string.IsNullOrWhiteSpace(matchDate) && !string.IsNullOrWhiteSpace(screenDateTime))
+                SplitScreenDateTime(screenDateTime, out matchDate, out matchTime);
 
-            var calendarMatch = FindCalendarMatch(matchLookup, normalizedHome, normalizedAway, Get(values, headers, "match_date"));
+            var calendarMatch = FindCalendarMatch(matchLookup, normalizedHome, normalizedAway, matchDate);
+            var odds1 = GetDouble(values, headers, "odds_1");
+            var oddsX = GetDouble(values, headers, "odds_x");
+            var odds2 = GetDouble(values, headers, "odds_2");
+            var overOdds = GetDouble(values, headers, "over_odds");
+            var underOdds = GetDouble(values, headers, "under_odds");
 
             matches.Add(new GameOddsMatch
             {
-                MatchKey = Get(values, headers, "match_key"),
-                MatchDate = Get(values, headers, "match_date"),
-                MatchTime = Get(values, headers, "match_time"),
+                MatchKey = GetAny(values, headers, "match_key", "match_no"),
+                MatchDate = matchDate,
+                MatchTime = matchTime,
                 HomeTeamRaw = homeRaw,
                 AwayTeamRaw = awayRaw,
                 HomeTeam = home,
@@ -59,18 +77,18 @@ public sealed class GameOddsImporter
                 CalendarGroupCode = calendarMatch?.GroupCode ?? string.Empty,
                 CalendarStartUtc = calendarMatch?.Match.StartUtc,
                 MatchStatus = calendarMatch is null ? "unmatched" : "matched",
-                Odds1 = GetDouble(values, headers, "odds_1"),
-                OddsX = GetDouble(values, headers, "odds_x"),
-                Odds2 = GetDouble(values, headers, "odds_2"),
-                Odds1X2Overround = GetDouble(values, headers, "odds_1x2_overround"),
-                Handicap1Line = GetDouble(values, headers, "handicap1_line"),
-                Handicap1Odds = GetDouble(values, headers, "handicap1_odds"),
-                Handicap2Line = GetDouble(values, headers, "handicap2_line"),
-                Handicap2Odds = GetDouble(values, headers, "handicap2_odds"),
+                Odds1 = odds1,
+                OddsX = oddsX,
+                Odds2 = odds2,
+                Odds1X2Overround = GetDouble(values, headers, "odds_1x2_overround") ?? CalculateOverround(odds1, oddsX, odds2),
+                Handicap1Line = GetDoubleAny(values, headers, "handicap1_line", "handicap_1_line"),
+                Handicap1Odds = GetDoubleAny(values, headers, "handicap1_odds", "handicap_1_odds"),
+                Handicap2Line = GetDoubleAny(values, headers, "handicap2_line", "handicap_2_line"),
+                Handicap2Odds = GetDoubleAny(values, headers, "handicap2_odds", "handicap_2_odds"),
                 TotalLine = GetDouble(values, headers, "total_line"),
-                OverOdds = GetDouble(values, headers, "over_odds"),
-                UnderOdds = GetDouble(values, headers, "under_odds"),
-                TotalOverround = GetDouble(values, headers, "total_overround"),
+                OverOdds = overOdds,
+                UnderOdds = underOdds,
+                TotalOverround = GetDouble(values, headers, "total_overround") ?? CalculateOverround(overOdds, underOdds),
                 BttsYesOdds = GetDouble(values, headers, "btts_yes_odds"),
                 BttsNoOdds = GetDouble(values, headers, "btts_no_odds"),
                 BttsOverround = GetDouble(values, headers, "btts_overround"),
@@ -239,6 +257,50 @@ public sealed class GameOddsImporter
 
     private static string NormalizeHeader(string value)
         => value.Trim().TrimStart('\uFEFF').ToLowerInvariant().Replace(" ", "_").Replace("-", "_");
+
+    private static string GetAny(IReadOnlyList<string> values, IReadOnlyDictionary<string, int> headers, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            var value = Get(values, headers, key);
+            if (!string.IsNullOrWhiteSpace(value))
+                return value;
+        }
+
+        return string.Empty;
+    }
+
+    private static double? GetDoubleAny(IReadOnlyList<string> values, IReadOnlyDictionary<string, int> headers, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            var value = GetDouble(values, headers, key);
+            if (value.HasValue)
+                return value;
+        }
+
+        return null;
+    }
+
+    private static void SplitScreenDateTime(string value, out string date, out string time)
+    {
+        var parts = value.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        date = parts.Length >= 1 ? parts[0] : string.Empty;
+        time = parts.Length >= 2 ? parts[1] : string.Empty;
+    }
+
+    private static double? CalculateOverround(params double?[] odds)
+    {
+        var sum = 0.0d;
+        foreach (var odd in odds)
+        {
+            if (!odd.HasValue || odd.Value <= 1.0d)
+                return null;
+            sum += 1.0d / odd.Value;
+        }
+
+        return sum;
+    }
 
     private static string Get(IReadOnlyList<string> values, IReadOnlyDictionary<string, int> headers, string key)
     {
