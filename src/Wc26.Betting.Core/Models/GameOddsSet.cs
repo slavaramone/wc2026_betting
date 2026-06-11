@@ -13,6 +13,7 @@ public sealed class GameOddsMatch
     public string MatchKey { get; init; } = string.Empty;
     public string MatchDate { get; init; } = string.Empty;
     public string MatchTime { get; init; } = string.Empty;
+    public string SourceGroupCode { get; init; } = string.Empty;
 
     public string HomeTeamRaw { get; init; } = string.Empty;
     public string AwayTeamRaw { get; init; } = string.Empty;

@@ -19,8 +19,8 @@ public sealed class MarketImpliedXgBuilder
         ["Canada"] = "B", ["Bosnia & Herzegovina"] = "B", ["Qatar"] = "B", ["Switzerland"] = "B",
         ["United States"] = "C", ["Paraguay"] = "C", ["Australia"] = "C", ["Turkey"] = "C",
         ["Brazil"] = "D", ["Morocco"] = "D", ["Haiti"] = "D", ["Scotland"] = "D",
-        ["Germany"] = "E", ["Curaçao"] = "E", ["Netherlands"] = "E", ["Japan"] = "E",
-        ["Côte d'Ivoire"] = "F", ["Ecuador"] = "F", ["Sweden"] = "F", ["Tunisia"] = "F",
+        ["Germany"] = "E", ["Curaçao"] = "E", ["Côte d'Ivoire"] = "E", ["Ecuador"] = "E",
+        ["Netherlands"] = "F", ["Japan"] = "F", ["Sweden"] = "F", ["Tunisia"] = "F",
         ["Spain"] = "G", ["Cabo Verde"] = "G", ["Saudi Arabia"] = "G", ["Uruguay"] = "G",
         ["Belgium"] = "H", ["Egypt"] = "H", ["Iran"] = "H", ["New Zealand"] = "H",
         ["France"] = "I", ["Senegal"] = "I", ["Iraq"] = "I", ["Norway"] = "I",
@@ -60,6 +60,10 @@ public sealed class MarketImpliedXgBuilder
             }
         }
 
+        var groupDiagnostics = BuildGroupDiagnostics(fixtures);
+        var validationErrors = ValidateFixtures(fixtures, groupDiagnostics);
+        warnings.AddRange(validationErrors);
+
         return new MarketImpliedXgSet
         {
             SourceOddsFile = odds.SourceFile,
@@ -68,7 +72,9 @@ public sealed class MarketImpliedXgBuilder
             InvalidFixtureCount = fixtures.Count(x => !string.Equals(x.Status, "valid", StringComparison.OrdinalIgnoreCase)),
             MaxGoalsUsed = maxGoals,
             Fixtures = fixtures,
-            Warnings = warnings
+            GroupDiagnostics = groupDiagnostics,
+            Warnings = warnings,
+            ValidationErrors = validationErrors
         };
     }
 
@@ -85,6 +91,7 @@ public sealed class MarketImpliedXgBuilder
         await WriteJsonAsync(Path.Combine(outputFolder, "wc26-fixture-market-xg.json"), set, overwrite, cancellationToken);
         await WriteCsvAsync(Path.Combine(outputFolder, "wc26-fixture-market-xg.csv"), set, overwrite, cancellationToken);
         await WriteDiagnosticsCsvAsync(Path.Combine(outputFolder, "wc26-fixture-market-xg-diagnostics.csv"), set, overwrite, cancellationToken);
+        await WriteGroupDiagnosticsCsvAsync(Path.Combine(outputFolder, "wc26-fixture-market-xg-group-diagnostics.csv"), set, overwrite, cancellationToken);
 
         return set;
     }
@@ -114,13 +121,16 @@ public sealed class MarketImpliedXgBuilder
 
         var totalLambda = SolveTotalLambda(totalLine, noVigPOver);
         var split = SolveTeamSplit(totalLambda, totalLine, noVigP1, noVigPX, noVigP2, noVigPOver, maxGoals);
+        var group = ResolveGroupCode(match);
 
         return new MarketImpliedXgFixture
         {
             MatchKey = match.MatchKey,
             MatchDate = match.MatchDate,
             MatchTime = match.MatchTime,
-            GroupCode = ResolveGroupCode(match),
+            GroupCode = group.GroupCode,
+            SourceGroupCode = match.SourceGroupCode,
+            GroupSource = group.Source,
             MatchStatus = match.MatchStatus,
             CalendarEventId = match.CalendarEventId,
             TeamA = match.HomeTeam,
@@ -164,12 +174,16 @@ public sealed class MarketImpliedXgBuilder
     }
 
     private static MarketImpliedXgFixture BuildInvalidFixture(GameOddsMatch match, string warning)
-        => new()
+    {
+        var group = ResolveGroupCode(match);
+        return new MarketImpliedXgFixture
         {
             MatchKey = match.MatchKey,
             MatchDate = match.MatchDate,
             MatchTime = match.MatchTime,
-            GroupCode = ResolveGroupCode(match),
+            GroupCode = group.GroupCode,
+            SourceGroupCode = match.SourceGroupCode,
+            GroupSource = group.Source,
             MatchStatus = match.MatchStatus,
             CalendarEventId = match.CalendarEventId,
             TeamA = match.HomeTeam,
@@ -179,6 +193,7 @@ public sealed class MarketImpliedXgBuilder
             Status = "invalid",
             Warning = warning
         };
+    }
 
     private static SplitResult SolveTeamSplit(
         double totalLambda,
@@ -307,10 +322,13 @@ public sealed class MarketImpliedXgBuilder
         return result;
     }
 
-    private static string ResolveGroupCode(GameOddsMatch match)
+    private static GroupResolveResult ResolveGroupCode(GameOddsMatch match)
     {
+        if (!string.IsNullOrWhiteSpace(match.SourceGroupCode))
+            return new GroupResolveResult(match.SourceGroupCode.Trim().ToUpperInvariant(), "input-csv");
+
         if (!string.IsNullOrWhiteSpace(match.CalendarGroupCode))
-            return match.CalendarGroupCode;
+            return new GroupResolveResult(match.CalendarGroupCode.Trim().ToUpperInvariant(), "calendar");
 
         var teamA = GameOddsImporter.NormalizeTeamName(match.NormalizedHomeTeam);
         var teamB = GameOddsImporter.NormalizeTeamName(match.NormalizedAwayTeam);
@@ -319,10 +337,10 @@ public sealed class MarketImpliedXgBuilder
             GroupCodeByTeam.TryGetValue(teamB, out var groupB) &&
             string.Equals(groupA, groupB, StringComparison.OrdinalIgnoreCase))
         {
-            return groupA;
+            return new GroupResolveResult(groupA, "team-map");
         }
 
-        return string.Empty;
+        return new GroupResolveResult(string.Empty, "missing");
     }
 
     private static double RequirePositive(double? value, string name)
@@ -356,7 +374,7 @@ public sealed class MarketImpliedXgBuilder
         await using var writer = new StreamWriter(path);
         await writer.WriteLineAsync(string.Join(',', new[]
         {
-            "MatchDate", "MatchTime", "Group", "TeamA", "TeamB", "TeamAXg", "TeamBXg", "TotalLambda", "TeamAShare",
+            "MatchDate", "MatchTime", "Group", "GroupSource", "TeamA", "TeamB", "TeamAXg", "TeamBXg", "TotalLambda", "TeamAShare",
             "Odds1", "OddsX", "Odds2", "NoVigP1", "NoVigPX", "NoVigP2", "ModelP1", "ModelPX", "ModelP2",
             "TotalLine", "OverOdds", "UnderOdds", "NoVigPOver", "ModelPOver", "ErrorP1", "ErrorPX", "ErrorP2", "ErrorOver", "ObjectiveError", "Status", "Warning"
         }));
@@ -365,7 +383,7 @@ public sealed class MarketImpliedXgBuilder
         {
             await writer.WriteLineAsync(string.Join(',', new[]
             {
-                Csv(f.MatchDate), Csv(f.MatchTime), Csv(f.GroupCode), Csv(f.TeamA), Csv(f.TeamB),
+                Csv(f.MatchDate), Csv(f.MatchTime), Csv(f.GroupCode), Csv(f.GroupSource), Csv(f.TeamA), Csv(f.TeamB),
                 D(f.TeamAXg), D(f.TeamBXg), D(f.TotalLambda), D(f.TeamAShare),
                 D(f.Odds1), D(f.OddsX), D(f.Odds2), D(f.NoVigP1), D(f.NoVigPX), D(f.NoVigP2), D(f.ModelP1), D(f.ModelPX), D(f.ModelP2),
                 D(f.TotalLine), D(f.OverOdds), D(f.UnderOdds), D(f.NoVigPOver), D(f.ModelPOver), D(f.ErrorP1), D(f.ErrorPX), D(f.ErrorP2), D(f.ErrorOver), D(f.ObjectiveError), Csv(f.Status), Csv(f.Warning)
@@ -379,13 +397,13 @@ public sealed class MarketImpliedXgBuilder
             throw new IOException($"Output file already exists: {path}. Use --overwrite.");
 
         await using var writer = new StreamWriter(path);
-        await writer.WriteLineAsync("Group,TeamA,TeamB,NoVigP1,ModelP1,ErrorP1,NoVigPX,ModelPX,ErrorPX,NoVigP2,ModelP2,ErrorP2,NoVigPOver,ModelPOver,ErrorOver,TotalLambda,TeamAXg,TeamBXg,ObjectiveError,Status,Warning");
+        await writer.WriteLineAsync("Group,GroupSource,TeamA,TeamB,NoVigP1,ModelP1,ErrorP1,NoVigPX,ModelPX,ErrorPX,NoVigP2,ModelP2,ErrorP2,NoVigPOver,ModelPOver,ErrorOver,TotalLambda,TeamAXg,TeamBXg,ObjectiveError,Status,Warning");
 
         foreach (var f in set.Fixtures.OrderByDescending(x => Math.Abs(x.ErrorP1) + Math.Abs(x.ErrorPX) + Math.Abs(x.ErrorP2)))
         {
             await writer.WriteLineAsync(string.Join(',', new[]
             {
-                Csv(f.GroupCode), Csv(f.TeamA), Csv(f.TeamB),
+                Csv(f.GroupCode), Csv(f.GroupSource), Csv(f.TeamA), Csv(f.TeamB),
                 D(f.NoVigP1), D(f.ModelP1), D(f.ErrorP1),
                 D(f.NoVigPX), D(f.ModelPX), D(f.ErrorPX),
                 D(f.NoVigP2), D(f.ModelP2), D(f.ErrorP2),
@@ -395,9 +413,85 @@ public sealed class MarketImpliedXgBuilder
         }
     }
 
+
+    private static List<MarketImpliedXgGroupDiagnostic> BuildGroupDiagnostics(IReadOnlyList<MarketImpliedXgFixture> fixtures)
+    {
+        return fixtures
+            .GroupBy(x => string.IsNullOrWhiteSpace(x.GroupCode) ? "<missing>" : x.GroupCode, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(g =>
+            {
+                var valid = g.Where(x => string.Equals(x.Status, "valid", StringComparison.OrdinalIgnoreCase)).ToList();
+                var teams = g.SelectMany(x => new[] { x.NormalizedTeamA, x.NormalizedTeamB })
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                var warnings = new List<string>();
+                if (g.Key == "<missing>")
+                    warnings.Add("group is missing");
+                if (g.Count() != 6)
+                    warnings.Add($"expected 6 fixtures, got {g.Count()}");
+                if (teams.Count != 4)
+                    warnings.Add($"expected 4 unique teams, got {teams.Count}");
+
+                return new MarketImpliedXgGroupDiagnostic
+                {
+                    GroupCode = g.Key == "<missing>" ? string.Empty : g.Key,
+                    FixtureCount = g.Count(),
+                    ValidFixtureCount = valid.Count,
+                    InvalidFixtureCount = g.Count(x => !string.Equals(x.Status, "valid", StringComparison.OrdinalIgnoreCase)),
+                    UniqueTeamCount = teams.Count,
+                    Teams = string.Join(" | ", teams),
+                    AverageTotalLambda = valid.Count == 0 ? 0.0d : valid.Average(x => x.TotalLambda),
+                    SumTotalLambda = valid.Sum(x => x.TotalLambda),
+                    Status = warnings.Count == 0 ? "valid" : "invalid",
+                    Warning = string.Join("; ", warnings)
+                };
+            })
+            .ToList();
+    }
+
+    private static List<string> ValidateFixtures(IReadOnlyList<MarketImpliedXgFixture> fixtures, IReadOnlyList<MarketImpliedXgGroupDiagnostic> groupDiagnostics)
+    {
+        var errors = new List<string>();
+
+        foreach (var fixture in fixtures.Where(x => string.IsNullOrWhiteSpace(x.GroupCode)))
+            errors.Add($"Missing group: {fixture.TeamA} - {fixture.TeamB}");
+
+        foreach (var group in groupDiagnostics.Where(x => !string.Equals(x.Status, "valid", StringComparison.OrdinalIgnoreCase)))
+        {
+            var groupCode = string.IsNullOrWhiteSpace(group.GroupCode) ? "<missing>" : group.GroupCode;
+            errors.Add($"Group {groupCode}: {group.Warning}");
+        }
+
+        return errors;
+    }
+
+    private static async Task WriteGroupDiagnosticsCsvAsync(string path, MarketImpliedXgSet set, bool overwrite, CancellationToken cancellationToken)
+    {
+        if (File.Exists(path) && !overwrite)
+            throw new IOException($"Output file already exists: {path}. Use --overwrite.");
+
+        await using var writer = new StreamWriter(path);
+        await writer.WriteLineAsync("Group,FixtureCount,ValidFixtureCount,InvalidFixtureCount,UniqueTeamCount,Teams,AverageTotalLambda,SumTotalLambda,Status,Warning");
+
+        foreach (var g in set.GroupDiagnostics)
+        {
+            await writer.WriteLineAsync(string.Join(',', new[]
+            {
+                Csv(g.GroupCode), D(g.FixtureCount), D(g.ValidFixtureCount), D(g.InvalidFixtureCount), D(g.UniqueTeamCount), Csv(g.Teams),
+                D(g.AverageTotalLambda), D(g.SumTotalLambda), Csv(g.Status), Csv(g.Warning)
+            }));
+        }
+    }
+
     private static string Csv(string? value) => SimpleCsv.Escape(value ?? string.Empty);
 
     private static string D(double value) => value.ToString("0.######", CultureInfo.InvariantCulture);
+
+    private sealed record GroupResolveResult(string GroupCode, string Source);
 
     private sealed record MatchProbs(double P1, double PX, double P2, double POver);
 

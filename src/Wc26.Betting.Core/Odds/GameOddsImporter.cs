@@ -50,6 +50,7 @@ public sealed class GameOddsImporter
             var normalizedAway = NormalizeTeamName(away);
             var matchDate = GetAny(values, headers, "match_date", "date");
             var matchTime = GetAny(values, headers, "match_time", "time");
+            var sourceGroupCode = NormalizeGroupCode(GetAny(values, headers, "group", "group_code", "groupcode", "market_group", "group_name"));
             var screenDateTime = GetAny(values, headers, "date_time_screen", "datetime", "date_time");
             if (string.IsNullOrWhiteSpace(matchDate) && !string.IsNullOrWhiteSpace(screenDateTime))
                 SplitScreenDateTime(screenDateTime, out matchDate, out matchTime);
@@ -66,6 +67,7 @@ public sealed class GameOddsImporter
                 MatchKey = GetAny(values, headers, "match_key", "match_no"),
                 MatchDate = matchDate,
                 MatchTime = matchTime,
+                SourceGroupCode = sourceGroupCode,
                 HomeTeamRaw = homeRaw,
                 AwayTeamRaw = awayRaw,
                 HomeTeam = home,
@@ -116,6 +118,22 @@ public sealed class GameOddsImporter
         await WriteJsonAsync(Path.Combine(folder, "game-odds.json"), set, overwrite, cancellationToken);
         await WriteOddsCsvAsync(Path.Combine(folder, "game-odds.csv"), set, overwrite, cancellationToken);
         await WriteMatchMapCsvAsync(Path.Combine(folder, "game-odds-match-map.csv"), set, overwrite, cancellationToken);
+    }
+
+
+    private static string NormalizeGroupCode(string value)
+    {
+        var v = value.Trim();
+        if (string.IsNullOrWhiteSpace(v))
+            return string.Empty;
+
+        v = v.Replace("Group", string.Empty, StringComparison.OrdinalIgnoreCase)
+             .Replace("Группа", string.Empty, StringComparison.OrdinalIgnoreCase)
+             .Trim();
+
+        return v.Length == 1 && char.IsLetter(v[0])
+            ? v.ToUpperInvariant()
+            : v.ToUpperInvariant();
     }
 
     public static string RussianToEnglishNationName(string value)

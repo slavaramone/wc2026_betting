@@ -232,8 +232,28 @@ internal static class CliApplication
         Console.WriteLine($"Rows: {result.RowCount}");
         Console.WriteLine($"Valid fixtures: {result.ValidFixtureCount}");
         Console.WriteLine($"Invalid fixtures: {result.InvalidFixtureCount}");
+        Console.WriteLine($"Validation errors: {result.ValidationErrors.Count}");
         Console.WriteLine($"Max goals grid: {result.MaxGoalsUsed}");
         Console.WriteLine($"Output: {outputFolder}");
+
+
+        Console.WriteLine();
+        Console.WriteLine("Group diagnostics:");
+        foreach (var group in result.GroupDiagnostics)
+        {
+            var status = string.Equals(group.Status, "valid", StringComparison.OrdinalIgnoreCase)
+                ? "OK"
+                : $"INVALID: {group.Warning}";
+            Console.WriteLine($"  {group.GroupCode}: fixtures {group.FixtureCount}, teams {group.UniqueTeamCount}, total xG sum {group.SumTotalLambda:0.00} ({status})");
+        }
+
+        if (result.ValidationErrors.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Validation errors:");
+            foreach (var error in result.ValidationErrors.Take(30))
+                Console.WriteLine($"  {error}");
+        }
 
         if (result.Warnings.Count > 0)
         {
@@ -261,7 +281,7 @@ internal static class CliApplication
             Console.WriteLine($"  {fixture.TeamA} - {fixture.TeamB}: abs error {error:P1}; market {fixture.NoVigP1:P1}/{fixture.NoVigPX:P1}/{fixture.NoVigP2:P1}; model {fixture.ModelP1:P1}/{fixture.ModelPX:P1}/{fixture.ModelP2:P1}");
         }
 
-        return result.InvalidFixtureCount == 0 ? 0 : 1;
+        return result.InvalidFixtureCount == 0 && result.ValidationErrors.Count == 0 ? 0 : 1;
     }
 
 

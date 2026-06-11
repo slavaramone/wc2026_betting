@@ -9,7 +9,23 @@ public sealed class MarketImpliedXgSet
     public int InvalidFixtureCount { get; init; }
     public int MaxGoalsUsed { get; init; }
     public List<MarketImpliedXgFixture> Fixtures { get; init; } = [];
+    public List<MarketImpliedXgGroupDiagnostic> GroupDiagnostics { get; init; } = [];
     public List<string> Warnings { get; init; } = [];
+    public List<string> ValidationErrors { get; init; } = [];
+}
+
+public sealed class MarketImpliedXgGroupDiagnostic
+{
+    public string GroupCode { get; init; } = string.Empty;
+    public int FixtureCount { get; init; }
+    public int ValidFixtureCount { get; init; }
+    public int InvalidFixtureCount { get; init; }
+    public int UniqueTeamCount { get; init; }
+    public string Teams { get; init; } = string.Empty;
+    public double AverageTotalLambda { get; init; }
+    public double SumTotalLambda { get; init; }
+    public string Status { get; init; } = string.Empty;
+    public string Warning { get; init; } = string.Empty;
 }
 
 public sealed class MarketImpliedXgFixture
@@ -18,6 +34,8 @@ public sealed class MarketImpliedXgFixture
     public string MatchDate { get; init; } = string.Empty;
     public string MatchTime { get; init; } = string.Empty;
     public string GroupCode { get; init; } = string.Empty;
+    public string SourceGroupCode { get; init; } = string.Empty;
+    public string GroupSource { get; init; } = string.Empty;
     public string MatchStatus { get; init; } = string.Empty;
     public long? CalendarEventId { get; init; }
 
