@@ -238,8 +238,11 @@ public sealed class GroupPropSimulationRunner
 
     private static IEnumerable<GroupPropProbability> BuildPropProbabilities(string groupCode, IReadOnlyList<SimulatedGroupSnapshot> snapshots)
     {
-        yield return BuildOverUnder(groupCode, "GroupTotalGoals", "Group total goals", "Group", 13.5, snapshots, x => x.TotalGoals, "Over");
-        yield return BuildOverUnder(groupCode, "GroupTotalGoals", "Group total goals", "Group", 13.5, snapshots, x => x.TotalGoals, "Under");
+        foreach (var line in HalfLines(8, 24))
+        {
+            yield return BuildOverUnder(groupCode, "GroupTotalGoals", "Group total goals", "Group", line, snapshots, x => x.TotalGoals, "Over");
+            yield return BuildOverUnder(groupCode, "GroupTotalGoals", "Group total goals", "Group", line, snapshots, x => x.TotalGoals, "Under");
+        }
 
         foreach (var line in HalfLines(0, 5))
         {

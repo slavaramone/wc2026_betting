@@ -167,6 +167,7 @@ public sealed class GroupPropMarketComparer
             "Score10Or01" => true,
             "Score21Or12" => true,
             "Score32Or23" => true,
+            "GroupTotalGoals" => true,
             _ => false
         };
     }
@@ -189,6 +190,7 @@ public sealed class GroupPropMarketComparer
             "Score32Or23" => new MappedMarket("ScorePairCount_3_2_2_3", "Group"),
             "TeamsWith9Points" => new MappedMarket("TeamsWith9Points", "Group"),
             "TeamsWith0Points" => new MappedMarket("TeamsWith0Points", "Group"),
+            "GroupTotalGoals" => new MappedMarket("GroupTotalGoals", "Group"),
             _ => null
         };
     }
@@ -278,7 +280,7 @@ public sealed class GroupPropMarketComparer
             rows.Add(new GroupPropOddsRow
             {
                 GroupCode = Get(cells, headers, "Group"),
-                MarketOrder = GetInt(cells, headers, "MarketOrder"),
+                MarketOrder = GetInt(cells, headers, "MarketOrder", i),
                 MarketType = Get(cells, headers, "MarketType"),
                 MarketNameRu = Get(cells, headers, "MarketNameRu"),
                 Line = GetDouble(cells, headers, "Line"),
@@ -363,9 +365,15 @@ public sealed class GroupPropMarketComparer
             : throw new InvalidOperationException($"CSV column '{name}' has invalid numeric value '{value}'.");
     }
 
-    private static int GetInt(IReadOnlyList<string> cells, IReadOnlyDictionary<string, int> headers, string name)
+    private static int GetInt(IReadOnlyList<string> cells, IReadOnlyDictionary<string, int> headers, string name, int defaultValue = 0)
     {
+        if (!headers.ContainsKey(name))
+            return defaultValue;
+
         var value = Get(cells, headers, name);
+        if (string.IsNullOrWhiteSpace(value))
+            return defaultValue;
+
         return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed)
             ? parsed
             : throw new InvalidOperationException($"CSV column '{name}' has invalid integer value '{value}'.");
